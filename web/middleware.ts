@@ -12,7 +12,11 @@ export async function middleware(req: NextRequest) {
   const subdominio = extractSubdomain(host);
 
   // Sem subdomínio (domínio raiz) → segue sem campanha selecionada.
-  if (!subdominio) return NextResponse.next();
+  if (!subdominio) {
+    const requestHeaders = new Headers(req.headers);
+    requestHeaders.delete('x-campanha-subdominio');
+    return NextResponse.next({ request: { headers: requestHeaders } });
+  }
 
   const supabase = publicClient();
   const { data } = await supabase
@@ -30,7 +34,8 @@ export async function middleware(req: NextRequest) {
     return new NextResponse('Campanha indisponível', { status: 403 });
   }
 
-  const res = NextResponse.next();
-  res.headers.set('x-campanha-subdominio', subdominio);
-  return res;
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.delete('x-campanha-subdominio');
+  requestHeaders.set('x-campanha-subdominio', subdominio);
+  return NextResponse.next({ request: { headers: requestHeaders } });
 }
