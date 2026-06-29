@@ -64,7 +64,7 @@ Ponte entre `auth.users` e `campanha`; fonte do claim lida pelo hook.
 | `user_id` | uuid PK, FK → `auth.users(id)` on delete cascade | um login = uma linha (ADR 0008: login preso a 1 campanha) |
 | `campanha_id` | uuid not null, FK → `campanha(id)` | campanha do login |
 | `papel` | `papel_login` not null | papel-base levado ao token |
-| `cpf_hmac` | bytea not null | índice cego do CPF (ADR 0010); nunca CPF em claro |
+| `cpf_hmac` | text not null | hex do HMAC-SHA256 do CPF (índice cego, ADR 0010); nunca CPF em claro |
 | `criado_em` | timestamptz not null default now() | |
 
 - `unique (campanha_id, cpf_hmac)` — o mesmo humano em duas campanhas usa dois
@@ -127,7 +127,7 @@ create policy "auth_admin_le_usuario_campanha" on public.usuario_campanha
 
 ## CPF→e-mail + índice cego HMAC
 
-- `cpf_hmac = HMAC-SHA256(cpf_normalizado, CPF_HMAC_KEY)`. `CPF_HMAC_KEY` vive
+- `cpf_hmac = hex(HMAC-SHA256(cpf_normalizado, CPF_HMAC_KEY))`. `CPF_HMAC_KEY` vive
   em **variável de ambiente do server** (fora do banco — ADR 0010), nunca
   acessível ao hook Postgres nem ao cliente. `cpf_normalizado` = só dígitos.
 - Dígitos verificadores do CPF validados no **cliente e no servidor**.
