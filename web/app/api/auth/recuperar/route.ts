@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
 
   if (email) {
     const ssr = ssrClient(await cookies());
-    const origin = req.headers.get('origin') ?? '';
+    const origin = new URL(req.url).origin;
     await ssr.auth.resetPasswordForEmail(email, { redirectTo: `${origin}${REDIRECT}` });
   }
   return generico;
