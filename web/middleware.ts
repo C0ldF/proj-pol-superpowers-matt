@@ -34,6 +34,24 @@ export async function middleware(req: NextRequest) {
     return new NextResponse('Campanha indisponível', { status: 403 });
   }
 
+  // Reforço de sessão: a sessão precisa pertencer à campanha deste subdomínio.
+  const { ssrClient } = await import('./lib/supabase/ssr');
+  const { adminClient } = await import('./lib/supabase/server');
+  const supabaseSsr = ssrClient(req.cookies as unknown as Parameters<typeof ssrClient>[0]);
+  const { data: userData } = await supabaseSsr.auth.getUser();
+  const tokenCampanhaId =
+    (userData.user?.app_metadata as { campanha_id?: string } | undefined)?.campanha_id ?? null;
+
+  if (tokenCampanhaId) {
+    const { sessaoConflitaSubdominio } = await import('./lib/auth/sessao-subdominio');
+    const { data: camp } = await adminClient()
+      .from('campanha').select('id').eq('subdominio', subdominio).maybeSingle();
+    if (sessaoConflitaSubdominio({ tokenCampanhaId, campanhaIdResolvida: camp?.id ?? null })) {
+      await supabaseSsr.auth.signOut();
+      return new NextResponse('Sessão inválida para esta campanha', { status: 403 });
+    }
+  }
+
   const requestHeaders = new Headers(req.headers);
   requestHeaders.delete('x-campanha-subdominio');
   requestHeaders.set('x-campanha-subdominio', subdominio);
