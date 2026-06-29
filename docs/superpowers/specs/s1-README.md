@@ -36,7 +36,7 @@ Content-Type: application/json
 }
 ```
 
-> Qual via foi usada será confirmada e registrada no momento da habilitação (step live do Task 12).
+> **Via usada (2026-06-29):** Opção 1 (Dashboard). Habilitação verificada fim-a-fim por login real — o JWT emitido por `signInWithPassword` carrega `app_metadata.campanha_id` e `app_metadata.papel` (ver seção *Verificação fim-a-fim*).
 
 ---
 
@@ -76,14 +76,28 @@ Cria 1 Gestor por campanha (campanha-a e campanha-b) com CPF hasheado via HMAC.
 - `SUPABASE_SECRET_KEY`
 - `CPF_HMAC_KEY`
 
-**Nota de execução:** `@supabase/supabase-js` precisa ser resolvível. O pacote está instalado em `web/node_modules`. Execute o seed a partir de `web/` ou instale a dependência na raiz do repo antes de rodar.
+**Nota de execução (importante):** `@supabase/supabase-js` está em `web/node_modules`, e o resolvedor de módulos ESM busca a dependência a partir do **diretório do próprio arquivo** (`supabase/seed/`), não do `cwd`. Por isso `cd web && node ../supabase/seed/...` **não** resolve a dependência. Use uma das vias abaixo:
 
 ```bash
-# a partir de web/
-cd web && node ../supabase/seed/s1_seed_usuarios.mjs
+# Via A (recomendada) — instalar a dep na raiz do repo, então rodar da raiz
+npm i @supabase/supabase-js
+node --env-file=web/.env.local supabase/seed/s1_seed_usuarios.mjs
 
-# ou a partir da raiz (após npm i @supabase/supabase-js na raiz)
-node supabase/seed/s1_seed_usuarios.mjs
+# Via B — rodar uma cópia do script fisicamente dentro de web/ (resolve via web/node_modules)
+cp supabase/seed/s1_seed_usuarios.mjs web/_seed_tmp.mjs
+cd web && node --env-file=.env.local _seed_tmp.mjs && rm _seed_tmp.mjs
 ```
 
-A execução live (Steps 3–6 do Task 12: rodar seed, verificar claims, testar isolamento RLS, rodar advisors) está pendente e será feita quando `CPF_HMAC_KEY` e o Auth hook estiverem configurados.
+> `--env-file` (Node ≥ 20.6) carrega os segredos de `web/.env.local` sem exportá-los manualmente.
+
+---
+
+## Verificação fim-a-fim (Task 12 — executada 2026-06-29)
+
+Todos os critérios de pronto do spec foram validados no projeto cloud `axcftjqdjvknrpqzrxls`:
+
+1. **Seed:** `seed ok` para `gestor.a@teste.local` (campanha-a) e `gestor.b@teste.local` (campanha-b).
+2. **Hook (função):** `custom_access_token_hook` produz `app_metadata = {campanha_id, papel:"gestor"}` correto para cada usuário semeado.
+3. **Hook (login real):** `signInWithPassword(gestor.a@teste.local)` emite JWT cujo `app_metadata.campanha_id` = id da campanha A e `papel` = `gestor` — prova de que o Auth invoca o hook.
+4. **Isolamento RLS com claim real:** sob a claim de A, apenas linhas de A são visíveis em `audit_log` (0 de B); idem para B. Isolamento multi-tenant fim-a-fim confirmado.
+5. **Advisors (security):** nenhum alerta **novo** do S1 (todas as 4 funções com `search_path=''`; `usuario_campanha` com RLS+policy). Lints remanescentes são pré-existentes do S0 e intencionais: `security_definer_view` em `campanha_publica` (ERROR, por design), `rls_enabled_no_policy` em `campanha` (INFO, default-deny). Há ainda um WARN de config do Auth — `auth_leaked_password_protection` desabilitado (proteção HaveIBeenPwned); ligar é um toggle recomendado, deferido.
