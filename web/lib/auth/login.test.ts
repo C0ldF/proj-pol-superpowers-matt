@@ -50,6 +50,7 @@ describe('loginCampanha', () => {
     const r = await loginCampanha({ identificador: '529.982.247-25', senha: 's', subdominio: 'campanha-a' }, d);
     expect(r.ok).toBe(false);
     expect(d.signIn).not.toHaveBeenCalled();
+    expect(d.registrarEvento).toHaveBeenCalledWith('login.falha', CAMP, expect.anything());
   });
 
   it('rejeita e desloga quando o token é de outra campanha', async () => {
