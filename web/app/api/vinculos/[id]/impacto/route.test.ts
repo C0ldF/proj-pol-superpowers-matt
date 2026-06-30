@@ -5,6 +5,13 @@ vi.mock('next/headers', () => ({ cookies: vi.fn(() => ({ getAll: () => [] })) })
 vi.mock('../../../../../lib/supabase/ssr', () => ({
   ssrClient: vi.fn(() => ({
     auth: { getUser: vi.fn(async () => ({ data: { user: { id: 'u-1' } }, error: null })) },
+    from: vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          single: vi.fn(async () => ({ data: { id: 'v-1' }, error: null })),
+        })),
+      })),
+    })),
   })),
 }));
 

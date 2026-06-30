@@ -11,6 +11,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const { id } = await params;
 
+  // Pre-check: user-scoped client — RLS enforces vinculo_select policy
+  const { data: visCheck, error: visErr } = await supabase
+    .from('vinculo')
+    .select('id')
+    .eq('id', id)
+    .single();
+  if (visErr || !visCheck) return NextResponse.json({ erro: 'não encontrado' }, { status: 404 });
+
   const { data: count, error } = await adminClient().rpc('subarvore_count', {
     p_vinculo_id: id,
   });

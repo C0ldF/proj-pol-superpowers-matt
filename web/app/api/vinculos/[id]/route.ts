@@ -19,7 +19,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   } catch { /* ok, destino_id remains null */ }
 
   try {
-    await removerVinculo({ vinculo_id: id, destino_id }, buildRemoverDeps());
+    await removerVinculo({ vinculo_id: id, destino_id }, buildRemoverDeps(supabase));
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'erro interno';
     return NextResponse.json({ erro: msg }, { status: 500 });
