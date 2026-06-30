@@ -244,6 +244,17 @@ BEGIN
     FROM public.vinculo WHERE id = p_vinculo_id;
   IF NOT FOUND THEN RAISE EXCEPTION 'vínculo não encontrado: %', p_vinculo_id; END IF;
 
+  -- Guard: novo_responsavel não pode ser filho direto da pessoa sendo realocada
+  IF p_novo_responsavel_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM public.vinculo
+     WHERE pessoa_id = p_novo_responsavel_id
+       AND responsavel_id = v.pessoa_id
+       AND campanha_id = v.campanha_id
+  ) THEN
+    RAISE EXCEPTION 'novo responsável % é filho direto de %, criaria ciclo após remoção',
+      p_novo_responsavel_id, v.pessoa_id;
+  END IF;
+
   UPDATE public.vinculo
      SET responsavel_id = p_novo_responsavel_id
    WHERE responsavel_id = v.pessoa_id AND campanha_id = v.campanha_id AND id != p_vinculo_id;
@@ -314,7 +325,7 @@ BEGIN
   RETURN jsonb_build_object('pessoa_id', nova_pessoa_id, 'vinculo_id', novo_vinculo_id);
 END;
 $$;
-REVOKE ALL ON FUNCTION public.criar_pessoa_com_vinculo FROM public, authenticated, anon;
+REVOKE ALL ON FUNCTION public.criar_pessoa_com_vinculo(uuid, text, text, text, text, text, text, public.base_legal_enum, public.origem_coleta_enum, uuid, public.papel_vinculo, uuid, uuid, inet, text) FROM public, authenticated, anon;
 
 -- ============================================================
 -- Atualizar RLS de pessoa para usar actor_pode_ver_pessoa
