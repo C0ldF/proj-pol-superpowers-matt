@@ -22,8 +22,9 @@ RLS e derivar o papel-base do token a partir dos Vínculos ativos.
    `auth.users` automaticamente. FK `usuario_campanha.pessoa_id` preenchida só no
    ato de provisão (via service_role no server).
 3. **Sync de papel no token:** trigger em `vinculo` atualiza
-   `usuario_campanha.papel = MAX(papel ativo)` após cada mutação. Hook do S1
-   **não muda** — continua lendo `usuario_campanha.papel`.
+   `usuario_campanha.papel` usando tabela `papel_prioridade` (ORDER BY prioridade DESC
+   LIMIT 1) — sem MAX(enum). Hook do S1 **não muda** — continua lendo
+   `usuario_campanha.papel`.
 4. **Título de eleitor:** duplo armazenamento — `titulo_hmac` (HMAC blind, dedup)
    + `titulo_enc` (AES-GCM cifrado, exibição/exportação LGPD Art. 18).
 5. **Campos LGPD:** no schema desde o S2 (`base_legal`, `data_coleta`,
@@ -40,6 +41,14 @@ RLS e derivar o papel-base do token a partir dos Vínculos ativos.
 9. **Notificação in-app:** tabela `notificacao` simples. Email/push diferidos.
 10. **`papel_vinculo` enum novo:** inclui `apoiador` (sem login). `papel_login`
     (S1) não muda.
+11. **`public_id` em Pessoa:** coluna `public_id text UNIQUE NOT NULL` gerada
+    automaticamente (`pes_` + 8 chars aleatórios). UUID interno nunca aparece em
+    URLs/APIs — clientes referenciam Pessoas pelo `public_id`.
+12. **`papel_prioridade` tabela:** substitui MAX(enum) no trigger de sync. Coluna
+    `prioridade int` permite adicionar papéis futuros sem migration de enum.
+13. **`audit_entity` tabela:** before/after genérico para mutações de entidades
+    de domínio. Complementa `audit_log` do S0 (que fica para eventos de auth).
+    `ip`/`user_agent` populados via `set_config('app.request_ip', ...)` no server.
 
 ## Não-objetivos
 
@@ -59,7 +68,7 @@ RLS e derivar o papel-base do token a partir dos Vínculos ativos.
 
 `CPF_HMAC_KEY` já existe do S1 — reutilizada em `pessoa.cpf_hmac`.
 
-## Schema (migrations 0011–0017)
+## Schema (migrations 0011–0019)
 
 ### Novos enums
 
@@ -71,11 +80,46 @@ Distinto de `papel_login` (S1, sem `apoiador`). Vínculo usa `papel_vinculo`;
 
 **`origem_coleta_enum`**: `manual | importacao | api`
 
-### Tabela `pessoa`
+### Tabela `papel_prioridade`
+
+Lookup de prioridade numérica — substitui ordenação implícita de enum.
+
+| papel | prioridade |
+|---|---|
+| `gestor` | 100 |
+| `coordenador` | 80 |
+| `colaborador` | 60 |
+| `lideranca` | 40 |
+| `apoiador` | 0 |
+
+PK: `papel papel_vinculo`. Novo papel futuro = INSERT de linha; sem migration de enum.
+
+### Tabela `audit_entity`
+
+Registro genérico de before/after para mutações de entidades de domínio.
+Complementa `audit_log` do S0 (que fica para eventos de auth/segurança).
 
 | coluna | tipo | nota |
 |---|---|---|
 | `id` | uuid PK default gen_random_uuid() | |
+| `campanha_id` | uuid FK → `campanha(id)` | nullable (eventos cross-campanha do Superadmin) |
+| `tabela` | text not null | nome da tabela alterada |
+| `entidade_id` | uuid not null | PK do registro alterado |
+| `antes` | jsonb | estado anterior (null em INSERT) |
+| `depois` | jsonb | estado posterior (null em DELETE) |
+| `actor_user_id` | uuid FK → `auth.users(id)` | null em operações de sistema |
+| `ip` | inet | populado via `current_setting('app.request_ip')` no server |
+| `user_agent` | text | populado via `current_setting('app.request_ua')` no server |
+| `criado_em` | timestamptz not null default now() | |
+
+RLS: `SELECT` apenas para Gestor da campanha; INSERT só via funções SECURITY DEFINER e triggers; nenhum DELETE (append-only, alinhado com ADR 0014).
+
+### Tabela `pessoa`
+
+| coluna | tipo | nota |
+|---|---|---|
+| `id` | uuid PK default gen_random_uuid() | interno; nunca em URLs |
+| `public_id` | text UNIQUE NOT NULL | `pes_` + 8 chars aleatórios; usado em URLs/APIs |
 | `campanha_id` | uuid not null FK → `campanha(id)` | isolamento RLS |
 | `nome` | text not null | |
 | `titulo_hmac` | text | HMAC-SHA256(título normalizado, `TITULO_HMAC_KEY`) |
@@ -127,7 +171,7 @@ Distinto de `papel_login` (S1, sem `apoiador`). Vínculo usa `papel_vinculo`;
 | `lido_em` | timestamptz | null = não lida |
 | `criado_em` | timestamptz not null default now() | |
 
-### Alteração em `usuario_campanha` (migration 0017)
+### Alteração em `usuario_campanha` (migration 0019)
 
 ```sql
 ALTER TABLE usuario_campanha
@@ -135,6 +179,22 @@ ALTER TABLE usuario_campanha
 ```
 
 Nullable. Preenchido no ato de provisão de login pelo Gestor.
+
+## Sequência de migrations (projeto `axcftjqdjvknrpqzrxls`)
+
+| # | Nome | Conteúdo |
+|---|---|---|
+| 0011 | `enums_s2` | `papel_vinculo`, `base_legal_enum`, `origem_coleta_enum` |
+| 0012 | `papel_prioridade` | tabela + INSERT das 5 linhas de prioridade |
+| 0013 | `audit_entity` | tabela + RLS (Gestor SELECT; INSERT só via SECURITY DEFINER) |
+| 0014 | `pessoa` | tabela + `public_id` + `generate_pessoa_public_id()` + constraints + índices + RLS |
+| 0015 | `notificacao` | tabela + RLS (precisa existir antes dos triggers) |
+| 0016 | `funcoes_autoridade` | todas as funções SECURITY DEFINER |
+| 0017 | `vinculo` | tabela + trigger `trg_vinculo_ciclo_check` + índices + RLS |
+| 0018 | `triggers_vinculo` | `trg_vinculo_sync_papel` (usa `papel_prioridade`) + `trg_notificacao_vinculo_compartilhado` |
+| 0019 | `usuario_campanha_pessoa_id` | `ALTER TABLE usuario_campanha ADD COLUMN pessoa_id uuid REFERENCES pessoa(id) ON DELETE SET NULL` |
+
+`get_advisors(type=security)` após 0017 e após 0018 — pontos de verificação intermediária.
 
 ## Funções SECURITY DEFINER
 
@@ -194,14 +254,22 @@ Se sim: `RAISE EXCEPTION 'ciclo detectado'`.
 
 ### `trg_vinculo_sync_papel` — AFTER INSERT/UPDATE/DELETE ON `vinculo`
 
-Recalcula `usuario_campanha.papel` para a Pessoa afetada:
+Recalcula `usuario_campanha.papel` para a Pessoa afetada via `papel_prioridade`:
 
+```sql
+SELECT v.papel::papel_login
+  FROM public.vinculo v
+  JOIN public.papel_prioridade pp ON pp.papel = v.papel
+ WHERE v.pessoa_id = affected_pessoa_id
+   AND v.campanha_id = affected_campanha_id
+   AND v.papel != 'apoiador'
+ ORDER BY pp.prioridade DESC
+ LIMIT 1;
+-- resultado → UPDATE usuario_campanha SET papel = $resultado
+--             WHERE pessoa_id = affected_pessoa_id
 ```
-MAX papel entre vínculos ativos (excluindo apoiador)
-ordenação de prioridade para o token: gestor > coordenador > colaborador > lideranca
-(colaborador auxilia coordenador — fica acima de lideranca no gate grosso)
-→ UPDATE usuario_campanha SET papel = $max WHERE pessoa_id = affected_pessoa_id
-```
+
+Prioridade: gestor(100) > coordenador(80) > colaborador(60) > lideranca(40).
 
 Se nenhum vínculo com `papel >= lideranca` restar: grava
 `'login.acesso_revogado'` em `audit_log` (desativação manual pelo Gestor).
@@ -316,7 +384,7 @@ UI exibe diálogo de confirmação quando `count >= 50`.
 
 Body: `{ destino_id?: uuid }` (null = responsável acima automático).
 Chama `realocar_subarvore(vinculo_id, destino_id ?? responsavel_id)` + DELETE em transação.
-Grava `audit_log`. Se remoção por prioridade: grava `'vinculo.removido_por_prioridade'` + notificação para o removido.
+Grava `audit_entity` (antes/depois do Vínculo). Se remoção por prioridade: grava `'vinculo.removido_por_prioridade'` em `audit_log` + notificação para o removido.
 
 ### `POST /api/pessoas/:id/provisionar-login`
 
@@ -346,12 +414,15 @@ UPDATE `lido_em = now()`. RLS garante acesso só ao destinatário.
 8. **Realocação órfã**: Remover Vínculo de Coordenador com 3 filhos → filhos realocados para responsável acima em transação única; sub-árvore intacta
 9. **Notificação compartilhado**: B confirma segundo Vínculo de João → linha em `notificacao` para A; B não a vê (RLS)
 10. **Soft-delete**: `deleted_at` setado → Pessoa some do SELECT; hard DELETE por authenticated → policy bloqueia
-11. **`get_advisors(security)`**: sem alerta novo após migration 0015 e após 0016
+11. **`public_id`**: Pessoa criada tem `public_id` no formato `pes_XXXXXXXX`; UUID interno não aparece em nenhuma resposta de API
+12. **`papel_prioridade`**: trigger usa tabela; adicionar papel fictício `supervisor(90)` e verificar que supera `coordenador` sem alterar enum
+13. **`audit_entity`**: mutação em `pessoa` gera linha com `antes`/`depois` corretos; INSERT não gera `antes`; autenticado não consegue SELECT fora da própria campanha
+14. **`get_advisors(security)`**: sem alerta novo após migration 0017 e após 0018
 
 ### Camada Next.js
 
-12. **Fluxo dedup**: POST com título duplicado → 409 `match_por: 'titulo'`; com CPF duplicado (sem título) → 409 `match_por: 'cpf'`; confirmação → Vínculo criado + notificação disparada
-13. **HMAC/enc server-side**: banco não contém título nem CPF em claro; `titulo_enc` decifrável com `TITULO_ENC_KEY`; hashes one-way (inspeção de coluna)
-14. **Dry-run**: GET `/impacto` retorna count correto sem alterar dados
-15. **Provisão de login**: login com credenciais provisionadas emite JWT com `campanha_id` e `papel` corretos; `usuario_campanha.pessoa_id` aponta para a Pessoa
-16. **Isolamento de tenant**: Pessoa da campanha A não aparece em query com token de campanha B
+15. **Fluxo dedup**: POST com título duplicado → 409 `match_por: 'titulo'`; com CPF duplicado (sem título) → 409 `match_por: 'cpf'`; confirmação → Vínculo criado + notificação disparada
+16. **HMAC/enc server-side**: banco não contém título nem CPF em claro; `titulo_enc` decifrável com `TITULO_ENC_KEY`; hashes one-way (inspeção de coluna)
+17. **Dry-run**: GET `/impacto` retorna count correto sem alterar dados
+18. **Provisão de login**: login com credenciais provisionadas emite JWT com `campanha_id` e `papel` corretos; `usuario_campanha.pessoa_id` aponta para a Pessoa
+19. **Isolamento de tenant**: Pessoa da campanha A não aparece em query com token de campanha B
