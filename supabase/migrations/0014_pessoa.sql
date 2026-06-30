@@ -2,9 +2,9 @@
 CREATE OR REPLACE FUNCTION public.generate_pessoa_public_id()
 RETURNS text
 LANGUAGE sql
-SET search_path = 'public'
+SET search_path = ''
 AS $$
-  SELECT 'pes_' || substring(replace(gen_random_uuid()::text, '-', ''), 1, 8);
+  SELECT 'pes_' || lower(encode(extensions.gen_random_bytes(4), 'hex'));
 $$;
 
 CREATE TABLE public.pessoa (
