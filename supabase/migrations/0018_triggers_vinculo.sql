@@ -81,3 +81,9 @@ $$;
 CREATE TRIGGER trg_notificacao_vinculo_compartilhado
   AFTER INSERT ON public.vinculo
   FOR EACH ROW EXECUTE FUNCTION public.trg_notificacao_vinculo_compartilhado_fn();
+
+-- ============================================================
+-- Security: Restrict trigger function execution to SECURITY DEFINER only
+-- ============================================================
+REVOKE ALL ON FUNCTION public.trg_vinculo_sync_papel_fn() FROM public, authenticated, anon;
+REVOKE ALL ON FUNCTION public.trg_notificacao_vinculo_compartilhado_fn() FROM public, authenticated, anon;
