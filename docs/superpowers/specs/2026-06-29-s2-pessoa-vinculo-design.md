@@ -198,8 +198,8 @@ Recalcula `usuario_campanha.papel` para a Pessoa afetada:
 
 ```
 MAX papel entre vínculos ativos (excluindo apoiador)
-ordenação de prioridade para o token: gestor > coordenador > lideranca > colaborador
-(colaborador é transversal — perde para qualquer papel de árvore)
+ordenação de prioridade para o token: gestor > coordenador > colaborador > lideranca
+(colaborador auxilia coordenador — fica acima de lideranca no gate grosso)
 → UPDATE usuario_campanha SET papel = $max WHERE pessoa_id = affected_pessoa_id
 ```
 
