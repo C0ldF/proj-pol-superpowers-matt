@@ -25,6 +25,10 @@ export async function POST(req: NextRequest) {
         const { data } = await admin.rpc('auth_login_email', { p_subdominio: sub, p_cpf_hmac: hmac });
         return (data as string | null) ?? null;
       },
+      resolverEmailNaCampanha: async (sub, email) => {
+        const { data } = await admin.rpc('auth_recuperar_email', { p_subdominio: sub, p_email: email });
+        return (data as string | null) ?? null;
+      },
     },
   );
 
