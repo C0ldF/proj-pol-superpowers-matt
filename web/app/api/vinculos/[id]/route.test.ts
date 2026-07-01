@@ -5,6 +5,7 @@ vi.mock('next/headers', () => ({ cookies: vi.fn(() => ({ getAll: () => [] })) })
 vi.mock('../../../../lib/supabase/ssr', () => ({
   ssrClient: vi.fn(() => ({
     auth: { getUser: vi.fn(async () => ({ data: { user: { id: 'u-1' } }, error: null })) },
+    rpc: vi.fn(async () => ({ data: true, error: null })),
   })),
 }));
 

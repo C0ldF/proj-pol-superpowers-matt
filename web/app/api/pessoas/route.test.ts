@@ -6,7 +6,7 @@ vi.mock('../../../lib/pessoa/build-criar-deps', () => ({
     encryptTitulo: async (t: string) => 'e-' + t,
     cpfHmac:       (c: string) => 'h-' + c,
     buscarDuplicada:       vi.fn(async () => null),
-    criarPessoaComVinculo: vi.fn(async () => ({ pessoa_id: 'pid-1', vinculo_id: 'vid-1' })),
+    criarPessoaComVinculo: vi.fn(async () => ({ pessoa_id: 'pid-1', vinculo_id: 'vid-1', public_id: 'pes_aabbccdd' })),
   })),
 }));
 

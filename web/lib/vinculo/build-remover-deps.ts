@@ -17,9 +17,12 @@ export function buildRemoverDeps(supabase: SupabaseClient): RemoverVinculoDeps {
       if (error) throw error;
     },
     async deletarVinculo(vinculo_id) {
-      // Use user-scoped client so RLS policy vinculo_delete (actor_pode_remover_vinculo) is enforced
-      const { error } = await supabase.from('vinculo').delete().eq('id', vinculo_id);
+      const { data, error } = await supabase.from('vinculo').delete().eq('id', vinculo_id).select('id');
       if (error) throw error;
+      if (!data || data.length === 0) {
+        const err = Object.assign(new Error('vinculo_nao_encontrado'), { code: 'NOT_FOUND' });
+        throw err;
+      }
     },
   };
 }

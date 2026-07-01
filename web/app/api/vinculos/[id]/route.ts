@@ -12,6 +12,14 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
 
   const { id } = await params;
 
+  const { data: canRemove, error: authErr } = await supabase.rpc('actor_pode_remover_vinculo', {
+    actor_uid: user.id,
+    p_vinculo_id: id,
+  });
+  if (authErr || !canRemove) {
+    return NextResponse.json({ erro: 'não autorizado ou vínculo não encontrado' }, { status: 403 });
+  }
+
   let destino_id: string | null = null;
   try {
     const body = await req.json().catch(() => ({}));
@@ -22,7 +30,9 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     await removerVinculo({ vinculo_id: id, destino_id }, buildRemoverDeps(supabase));
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'erro interno';
-    return NextResponse.json({ erro: msg }, { status: 500 });
+    const code = (e as { code?: string }).code;
+    const status = code === 'NOT_FOUND' ? 404 : 500;
+    return NextResponse.json({ erro: msg }, { status });
   }
 
   return new NextResponse(null, { status: 204 });

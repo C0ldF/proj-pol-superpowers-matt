@@ -52,6 +52,6 @@ export async function POST(req: NextRequest) {
     }, { status: 409 });
   }
 
-  const public_id = result.public_id ?? `pes_${result.pessoa_id}`;
+  const public_id = result.public_id;
   return NextResponse.json({ public_id }, { status: 201 });
 }
