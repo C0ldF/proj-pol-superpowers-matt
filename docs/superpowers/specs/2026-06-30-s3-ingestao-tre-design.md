@@ -1,6 +1,6 @@
 # S3 — Ingestão TRE (Superadmin)
 
-Data: 2026-06-30
+Data: 2026-06-30 (revisado após review do usuário)
 Fatia do [roadmap](./2026-06-28-roadmap-decomposicao.md). Paralela ao S2 (já
 merjado), depende só do S0 (extensão PostGIS habilitada, `extensions.postgis`).
 ADRs cobertos: 0002, 0011, 0017, 0019.
@@ -11,62 +11,95 @@ Construir o pipeline curado que importa o cadastro oficial do TRE (locais de
 votação, seções, aptos) para tabelas globais relacionais, casando cada local
 com um bairro oficial, geocodificando o que faltar, e calculando elegibilidade
 de calor — dado de referência que o S4 (mapa de calor) vai consumir. Ao término
-do S3 o Superadmin consegue rodar `tre:ingest` sobre o CSV real de um
-município, revisar o que ficou pendente em `tre:revisar`, e `pessoa.secao_id`
-(coluna solta desde o S2) ganha FK real.
+do S3 o Superadmin consegue rodar o pipeline por fases sobre o CSV real de um
+município (`dry-run` → `ingest` → `revisar` → `geocode` → `publicar`), e
+`pessoa.secao_id` (coluna solta desde o S2) ganha FK real.
 
 ## Decisões desta fatia
 
 1. **Execução via script Node server-side, sem painel web.** S1 nunca criou
-   login/painel de Superadmin (deferido); em vez de criar essa dependência
-   agora, a ingestão roda por CLI (`tsx`) usando `adminClient()`
-   (`service_role`, já existe em `web/lib/supabase/server.ts`). Comandos:
-   `tre:seed-bairros`, `tre:ingest --csv <path> --municipio <cod_ibge> --ano
-   <ano>`, `tre:revisar`.
-2. **Encoding do CSV é Latin-1/CP1252, não UTF-8.** Confirmado por inspeção do
+   login/painel de Superadmin (deferido); a ingestão roda por CLI (`tsx`)
+   usando `adminClient()` (`service_role`, já existe em
+   `web/lib/supabase/server.ts`).
+2. **Pipeline em fases explícitas e reexecutáveis, não uma operação
+   monolítica.** Revisão do usuário identificou que a v1 misturava parse,
+   match, geocode (dependência externa) e publicação num único comando — o que
+   contradiz a própria ADR 0011 ("revisão antes de publicar"). Fases:
+
+   ```
+   seed-bairros → dry-run → ingest → revisar (staging) → geocode → publicar → (despublicar, se preciso reimportar)
+   ```
+
+   Cada fase é um comando CLI independente (ver "Camada de scripts"). Só
+   `publicar` torna o lote visível para campanhas (RLS); `ingest` sozinho
+   nunca publica.
+3. **Geocode é fase própria, fora do `ingest`.** `ingest` grava
+   `local_votacao` com `geo = NULL` e `geo_status` conforme o caso (ver
+   decisão 5); só `tre:geocode` chama a API externa. Isso torna `ingest`
+   determinístico e rápido (sem I/O de rede), não trava o lote inteiro se o
+   Nominatim estiver fora do ar, e permite reexecutar geocode quantas vezes
+   precisar sem re-parsear o CSV.
+4. **Encoding do CSV é Latin-1/CP1252, não UTF-8.** Confirmado por inspeção do
    arquivo real (`4a-ad1b-420e-9d99-aa785ee2386b.csv`): acentos corrompem
    quando lido como UTF-8 (`TR�NSITO`, `CENTEN�RIO`). `parse-csv.ts` decodifica
    explicitamente como `latin1` via `iconv-lite`.
-3. **Parser respeita aspas** (`csv-parse`, nunca `split(',')`) — o campo
+5. **`geo_status` enum substitui o antigo booleano `geo_aproximado`** —
+   `pendente | sucesso | falhou | manual | nao_necessario`. `nao_necessario`
+   = o CSV já trazia lat/long; `pendente` = falta e aguarda `tre:geocode`;
+   `sucesso`/`falhou` = resultado da tentativa; `manual` = Superadmin corrigiu
+   à mão via `tre:revisar` ou SQL direto. Mais rico que um boolean e cobre o
+   estado "ainda não tentamos".
+6. **Parser respeita aspas** (`csv-parse`, nunca `split(',')`) — o campo
    `SECOES` carrega vírgulas dentro de aspas: `"(s: 469, apt: 0), (s: 546, apt:
    0)"`.
-4. **Fuzzy match de bairro roda no Postgres** (`pg_trgm` + `unaccent`), não em
+7. **Fuzzy match de bairro roda no Postgres** (`pg_trgm` + `unaccent`), não em
    JS — reaproveitado tanto no match TRE↔`bairro_oficial` quanto na detecção de
    reconciliação (ADR 0017), e mais barato que Levenshtein em JS para 3556+
-   linhas.
-5. **Curadoria "tudo ou staging" no casamento de bairro.** Local cujo `BAIRRO`
-   do CSV não casa (`similarity < 0.4`) contra `bairro_oficial` **não entra em
-   `local_votacao`** — fica só em `local_votacao_staging` até o Superadmin
-   resolver manualmente (`tre:revisar`), que promove a linha.
-6. **Geocode real via Nominatim/OSM quando lat/long faltam.** Sem custo, sem
-   API key, alinhado à escolha OSM da ADR 0012. Rate-limit 1 req/s, timeout +
-   fallback para `NULL`, `User-Agent` próprio. Sucesso → `geo_aproximado =
-   true`; falha → `geo = NULL`, local ainda pode entrar em `local_votacao` (se
-   o bairro casou) mas fica fora do mapa até correção manual.
-7. **`elegivel_calor` independe de `geo`.** Calculada só por
+   linhas. Limiar configurável via parâmetro da função (decisão 12), não
+   hardcoded.
+8. **Curadoria "tudo ou staging" no casamento de bairro.** Local cujo `BAIRRO`
+   do CSV não casa contra `bairro_oficial` **não entra em `local_votacao`** —
+   fica só em `local_votacao_staging` até o Superadmin resolver manualmente
+   (`tre:revisar`), que promove a linha. Consequência de modelagem: como um
+   local sem bairro casado nunca chega a `local_votacao`,
+   `local_votacao.bairro_oficial_id` é **`NOT NULL`** (era nullable "por
+   integridade" numa versão anterior deste spec — inconsistente com a própria
+   regra; corrigido).
+9. **`elegivel_calor` independe de `geo`/`geo_status`.** Calculada só por
    TIPO/SITUACAO/aptos (regra 1 da ADR 0011) no INSERT — um local pode ser
    elegível e ainda assim invisível no mapa até ganhar geo.
-8. **Versionamento por (município, ano) com índice único parcial.** Só um lote
-   pode estar `publicado` por município+ano por vez
-   (`UNIQUE (municipio_id, ano) WHERE status = 'publicado'`). Reimportar
-   (correção) exige primeiro arquivar/despublicar o lote antigo manualmente —
-   sem fluxo automático de substituição nesta fatia.
-9. **`municipio`, `zona_eleitoral`, `bairro_oficial` são dimensões estáveis**
-   (upsert idempotente por chave natural, não versionadas por importação).
-   `local_votacao`/`secao` são fato, versionado via `importacao_id`.
-10. **`COD_BAIRRO` do CSV nunca é lido nem armazenado**, nem em staging (ADR
+10. **Versionamento por (município, ano) com índice único parcial +
+    `arquivado`.** Só um lote pode estar `publicado` por município+ano por vez
+    (`UNIQUE (municipio_id, ano) WHERE status = 'publicado'`). Reimportar
+    exige `tre:despublicar` do lote antigo primeiro (`publicado` →
+    `arquivado`, comando explícito, não automático).
+11. **`municipio`, `zona_eleitoral`, `bairro_oficial` são dimensões estáveis**
+    (upsert idempotente por chave natural, não versionadas por importação).
+    `local_votacao`/`secao` são fato, versionado via `importacao_id`.
+12. **Limiar de fuzzy match configurável.** `match_bairro_oficial(municipio_id,
+    nome_bruto, limiar numeric DEFAULT 0.4)` — parâmetro com default, não
+    constante hardcoded no SQL; CLI aceita `--limiar` pra ajustar sem migration.
+13. **`COD_BAIRRO` do CSV nunca é lido nem armazenado**, nem em staging (ADR
     0011 — lixo inconsistente). Vínculo de bairro é só por nome normalizado.
-11. **Mecânica de reconciliação (ADR 0017) construída nesta fatia**, mesmo sem
+14. **Auditabilidade do lote e da linha.** `importacao_tre` guarda
+    `arquivo_sha256` + `arquivo_tamanho_bytes` (prova qual arquivo gerou o
+    lote) e `importer_version` (versão da lógica do parser — o CSV do TRE muda
+    de formato entre ciclos eleitorais). `local_votacao`/`local_votacao_staging`
+    guardam `row_hash` (SHA-256 da linha original) — habilita detectar linhas
+    idênticas entre reimportações/anos sem reprocessar tudo. `log` em
+    `importacao_tre` segue um formato fixo (ver seção Auditoria), não um
+    jsonb solto sem contrato.
+15. **Mecânica de reconciliação (ADR 0017) construída nesta fatia**, mesmo sem
     dado real pra disparar ainda (é o primeiro import oficial — nenhuma
     campanha tem `bairro_local` própria ainda). `detectar_reconciliacao_bairro`
-    roda no publish de qualquer lote futuro; a função de resolução
+    roda dentro de `tre:publicar`; a função de resolução
     (`resolver_reconciliacao_bairro`) existe pronta, sem UI (painel Superadmin
     não existe ainda).
-12. **Campos extras do CSV real** (`QTD_CANCELADOS`, `QTD_SUSPENSOS`,
+16. **Campos extras do CSV real** (`QTD_CANCELADOS`, `QTD_SUSPENSOS`,
     `QTD_VAGAS_RESERVADAS`, `QTD_BASE_HISTORICA`, `TELEFONE`, `DATA_CRIACAO`)
     são armazenados em `local_votacao` para auditoria, fora das regras de
     negócio desta fatia.
-13. **`pessoa.secao_id` ganha FK real** para `secao(id)` na última migration —
+17. **`pessoa.secao_id` ganha FK real** para `secao(id)` na última migration —
     coluna existe solta desde a 0014 (S2), comentário no schema já apontava
     pro S3.
 
@@ -95,7 +128,8 @@ município, revisar o que ficou pendente em `tre:revisar`, e `pessoa.secao_id`
   inexistente em qualquer ADR ou no CSV atual (é cadastro de local, não
   boletim de urna). Exige nova fonte (TSE resultados) e provavelmente ADR
   nova; fora de escopo até essa decisão ser tomada.
-- Substituição/arquivamento automático de lote publicado → manual nesta fatia.
+- Settings/limiar em tabela dedicada → um único parâmetro não justifica uma
+  tabela; fica como default de função + flag de CLI (decisão 12).
 
 ## Dado de entrada
 
@@ -137,7 +171,10 @@ Agrupado por região (`regiao_central`, `zona_norte`, ...), cada entrada
 
 - **`tipo_local_enum`**: `convencional | transito | preso_provisorio | outro`
 - **`situacao_local_enum`**: `ativo | bloqueado`
-- **`status_importacao_enum`**: `pendente | processando | publicado | erro`
+- **`status_importacao_enum`**: `pendente | processando | pendente_revisao |
+  publicado | arquivado | erro`
+- **`geo_status_enum`**: `pendente | sucesso | falhou | manual |
+  nao_necessario`
 - **`status_bairro_local_enum`**: `pendente | confirmado | fundido`
 - **`status_reconciliacao_enum`**: `fundido | mantido_separado`
 
@@ -179,6 +216,9 @@ Agrupado por região (`regiao_central`, `zona_norte`, ...), cada entrada
 | `criado_em` | timestamptz not null default now() | |
 
 `UNIQUE (municipio_id, nome_normalizado)`.
+Índice `GIN (nome_normalizado extensions.gin_trgm_ops)` — é o que
+`match_bairro_oficial` de fato usa (`similarity()` em `ORDER BY`); o índice
+único btree acima não ajuda essa consulta.
 
 ### Tabela `importacao_tre` (lote)
 
@@ -190,14 +230,17 @@ Agrupado por região (`regiao_central`, `zona_norte`, ...), cada entrada
 | `ano` | integer not null | |
 | `status` | `status_importacao_enum` not null default `'pendente'` | |
 | `arquivo_nome` | text | nome do CSV original |
+| `arquivo_sha256` | text | hash do arquivo inteiro — prova qual CSV gerou o lote |
+| `arquivo_tamanho_bytes` | bigint | |
+| `importer_version` | text not null | versão da lógica do parser (ex.: `'s3.0'`) |
 | `total_linhas` | integer | |
 | `total_publicados` | integer | linhas que viraram `local_votacao` |
 | `total_staging` | integer | linhas que ficaram em `local_votacao_staging` |
 | `total_erros` | integer | linhas com erro de parse (nem staging) |
 | `operador` | text | identificador de quem rodou o script (não é `auth.users` — Superadmin não loga) |
-| `log` | jsonb | resumo de erros/avisos |
+| `log` | jsonb | ver formato fixo na seção Auditoria |
 | `iniciado_em` | timestamptz not null default now() | |
-| `publicado_em` | timestamptz | null até publicar |
+| `publicado_em` | timestamptz | null até `tre:publicar` |
 
 `UNIQUE INDEX ux_importacao_publicado ON importacao_tre (municipio_id, ano)
 WHERE status = 'publicado'` — só um lote vigente por município+ano.
@@ -209,14 +252,14 @@ WHERE status = 'publicado'` — só um lote vigente por município+ano.
 | `id` | uuid PK default gen_random_uuid() | |
 | `importacao_id` | uuid not null FK → `importacao_tre(id)` | |
 | `zona_id` | uuid not null FK → `zona_eleitoral(id)` | |
-| `bairro_oficial_id` | uuid FK → `bairro_oficial(id)` | nullable só por integridade; nesta fatia só entra aqui se casou (decisão 5) |
+| `bairro_oficial_id` | uuid **not null** FK → `bairro_oficial(id)` | nunca nulo — sem match não entra aqui (decisão 8) |
 | `bairro_nome_original` | text not null | `BAIRRO` bruto do CSV, auditoria |
 | `num_local` | integer not null | `NUM_LOCAL` |
 | `nome` | text not null | `LOCAL_VOTACAO` |
 | `endereco` | text | `ENDERECO` |
 | `cep` | text | só dígitos |
 | `geo` | `extensions.geometry(Point, 4326)` | nullable |
-| `geo_aproximado` | boolean not null default false | true se veio de geocode, não do CSV |
+| `geo_status` | `geo_status_enum` not null default `'pendente'` | ver decisão 5 |
 | `tipo` | `tipo_local_enum` not null | mapeado de `TIPO_LOCAL_VOTACAO` |
 | `situacao` | `situacao_local_enum` not null | mapeado de `SITUACAO_LOCAL_VOTACAO` |
 | `qtd_aptos` | integer not null default 0 | `QTD_APTOS` |
@@ -227,10 +270,21 @@ WHERE status = 'publicado'` — só um lote vigente por município+ano.
 | `telefone` | text | `TELEFONE` |
 | `data_criacao_tre` | timestamptz | `DATA_CRIACAO` |
 | `elegivel_calor` | boolean not null default false | regra 1, calculada no insert |
+| `avisos` | text[] not null default `'{}'` | flags não-bloqueantes (ex.: `'cep_invalido'`, `'qtd_aptos_diverge_soma_secoes'`) |
+| `row_hash` | text not null | SHA-256 da linha original do CSV |
 | `criado_em` | timestamptz not null default now() | |
 
-`UNIQUE (importacao_id, num_local)`. Índice GIST em `geo`
-(`idx_local_votacao_geo`).
+**Constraints:** `UNIQUE (importacao_id, num_local)`;
+`CHECK (qtd_aptos >= 0)`; `CHECK (qtd_cancelados >= 0)`;
+`CHECK (qtd_suspensos >= 0)`; `CHECK (qtd_vagas_reservadas >= 0)`;
+`CHECK (qtd_base_historica >= 0)`.
+Não há `CHECK (geometrytype(geo) = 'POINT')` — redundante: o tipo
+`geometry(Point, 4326)` já restringe a coluna a `Point` no nível do typmod,
+rejeitando qualquer outro tipo geométrico no INSERT (mais forte que um CHECK).
+
+**Índices:** GIST em `geo` (`idx_local_votacao_geo`); btree em
+`bairro_oficial_id` (`idx_local_votacao_bairro_oficial` — S4 agrega por
+bairro); btree em `row_hash`.
 
 ### Tabela `secao`
 
@@ -241,7 +295,8 @@ WHERE status = 'publicado'` — só um lote vigente por município+ano.
 | `numero` | integer not null | `s:` do parse de `SECOES` |
 | `aptos` | integer not null default 0 | `apt:` do parse de `SECOES` |
 
-`UNIQUE (local_id, numero)`.
+**Constraints:** `UNIQUE (local_id, numero)`; `CHECK (numero > 0)`;
+`CHECK (aptos >= 0)`.
 
 ### Tabela `local_votacao_staging`
 
@@ -250,12 +305,16 @@ WHERE status = 'publicado'` — só um lote vigente por município+ano.
 | `id` | uuid PK default gen_random_uuid() | |
 | `importacao_id` | uuid not null FK → `importacao_tre(id)` | |
 | `linha_original` | jsonb not null | linha crua do CSV (parseada), pra reprocessar |
-| `motivo` | text not null | `'bairro_sem_match'` \| `'erro_parse'` |
+| `row_hash` | text not null | SHA-256 da linha original |
+| `motivos` | text[] not null | ex.: `{'bairro_sem_match'}`, pode ter mais de um (`{'bairro_sem_match','erro_parse'}`) |
 | `revisado` | boolean not null default false | |
 | `resolvido_bairro_oficial_id` | uuid FK → `bairro_oficial(id)` | preenchido na revisão |
 | `revisado_em` | timestamptz | |
 | `revisado_por` | text | |
 | `criado_em` | timestamptz not null default now() | |
+
+**Constraints:** `CHECK (cardinality(motivos) > 0)`.
+**Índices:** `GIN (linha_original)` — audit/busca ad-hoc dentro do JSON.
 
 ### Tabela `bairro_local` (overlay de campanha)
 
@@ -292,15 +351,15 @@ WHERE status = 'publicado'` — só um lote vigente por município+ano.
 | # | Nome | Conteúdo |
 |---|---|---|
 | 0023 | `extensoes_tre` | `pg_trgm`, `unaccent` |
-| 0024 | `enums_tre` | 5 enums desta fatia |
+| 0024 | `enums_tre` | 6 enums desta fatia (inclui `geo_status_enum`) |
 | 0025 | `municipio` | tabela |
 | 0026 | `zona_eleitoral` | tabela + índice único |
-| 0027 | `bairro_oficial` | tabela + índice único |
+| 0027 | `bairro_oficial` | tabela + índice único + GIN trigram |
 | 0028 | `importacao_tre` | tabela + índice único parcial |
-| 0029 | `local_votacao` | tabela + índice único + GIST |
-| 0030 | `secao` | tabela + índice único |
-| 0031 | `local_votacao_staging` | tabela |
-| 0032 | `funcoes_match_bairro` | `normalizar_texto`, `match_bairro_oficial` |
+| 0029 | `local_votacao` | tabela + constraints + GIST + índices |
+| 0030 | `secao` | tabela + índice único + constraints |
+| 0031 | `local_votacao_staging` | tabela + GIN |
+| 0032 | `funcoes_match_bairro` | `normalizar_texto`, `match_bairro_oficial` (limiar parametrizável) |
 | 0033 | `tre_rls` | RLS em 0025–0031 |
 | 0034 | `bairro_local` | tabela + RLS |
 | 0035 | `reconciliacao_bairro` | `bairro_reconciliacao_alerta` + `detectar_reconciliacao_bairro` + `resolver_reconciliacao_bairro` + RLS |
@@ -318,42 +377,56 @@ authenticated, anon` (padrão do S2) — identificadores fully-qualified
 | Função | Descrição |
 |---|---|
 | `normalizar_texto(txt text)` | `lower(extensions.unaccent(trim(txt)))` |
-| `match_bairro_oficial(municipio_id integer, nome_bruto text)` | `ORDER BY extensions.similarity(nome_normalizado, normalizar_texto(nome_bruto)) DESC LIMIT 1`, retorna `NULL` se melhor score `< 0.4` |
-| `detectar_reconciliacao_bairro(importacao_id uuid)` | Para cada `bairro_oficial` recém-publicado no lote, confronta via trigram com `bairro_local` (`status != 'fundido'`) de **todas** as campanhas; insere `bairro_reconciliacao_alerta` quando não houver alerta igual ainda pendente |
+| `match_bairro_oficial(municipio_id integer, nome_bruto text, limiar numeric DEFAULT 0.4)` | `ORDER BY extensions.similarity(...) DESC LIMIT 1`, retorna `NULL` se melhor score `< limiar` |
+| `detectar_reconciliacao_bairro(importacao_id uuid)` | Para cada `bairro_oficial` do lote sendo publicado, confronta via trigram com `bairro_local` (`status != 'fundido'`) de **todas** as campanhas; insere `bairro_reconciliacao_alerta` quando não houver alerta igual ainda pendente |
 | `resolver_reconciliacao_bairro(alerta_id uuid, resolucao status_reconciliacao_enum, operador text)` | `'fundido'` → `bairro_local.status = 'fundido'` (sem mover Pessoa — ver não-objetivos); `'mantido_separado'` → só marca `resolvido = true` |
 
 ### `match_bairro_oficial` (esboço SQL)
 
 ```sql
 CREATE OR REPLACE FUNCTION public.match_bairro_oficial(
-  p_municipio_id integer, p_nome_bruto text
+  p_municipio_id integer, p_nome_bruto text, p_limiar numeric DEFAULT 0.4
 ) RETURNS uuid
 LANGUAGE sql SECURITY DEFINER SET search_path = ''
 AS $$
   SELECT id FROM public.bairro_oficial
    WHERE municipio_id = p_municipio_id
-     AND extensions.similarity(nome_normalizado, public.normalizar_texto(p_nome_bruto)) >= 0.4
+     AND extensions.similarity(nome_normalizado, public.normalizar_texto(p_nome_bruto)) >= p_limiar
    ORDER BY extensions.similarity(nome_normalizado, public.normalizar_texto(p_nome_bruto)) DESC
    LIMIT 1;
 $$;
 ```
 
-## Regras de negócio (mapeamento CSV → enum)
+## Regras de negócio
 
 - `TIPO_LOCAL_VOTACAO`: contém "TRANSITO"/"TRÂNSITO" → `transito`; contém
   "PRESO" ou "PRESIDIO"/"PRESÍDIO" → `preso_provisorio`; igual a
   "CONVENCIONAL" → `convencional`; qualquer outro → `outro`. Comparação após
-  `normalizar_texto`.
+  `normalizarTexto` (espelho JS de `normalizar_texto`).
 - `SITUACAO_LOCAL_VOTACAO`: igual a "ATIVO" (normalizado) → `ativo`; qualquer
   outro → `bloqueado`.
 - `elegivel_calor = (tipo = 'convencional' AND situacao = 'ativo' AND
-  qtd_aptos > 0)` — independe de `geo` (decisão 7).
-- `SECOES`: parse via regex `/\(s:\s*(\d+),\s*apt:\s*(\d+)\)/g` → lista
-  `{numero, aptos}[]`.
-- `CEP`: só dígitos, `String(cep).replace(/\D/g, '')`.
-- Geo ausente (`LATITUDE`/`LONGITUDE` vazios): tenta
-  `geocodeEndereco(endereco, cep, municipio, uf)` via Nominatim; sucesso →
-  `geo` + `geo_aproximado = true`; falha → `geo = NULL`.
+  qtd_aptos > 0)` — independe de `geo`/`geo_status` (decisão 9).
+- **Parse de `SECOES` — tolerante, porque o CSV do TRE muda de formato entre
+  ciclos:** regex `/\(s:\s*(\d+),\s*apt:\s*(\d+)\)/g`; ignora espaços extras
+  dentro dos parênteses; tolera vírgulas múltiplas/trailing entre grupos;
+  parênteses malformados ou `apt:`/`s:` vazio → não geram exceção, só um
+  warning em `avisos` (`'secao_malformada'`) e são pulados; seção duplicada
+  (mesmo `numero` duas vezes na mesma linha) → mantém a primeira ocorrência,
+  registra `'secao_duplicada'` em `avisos`.
+- `CEP`: só dígitos (`String(cep).replace(/\D/g, '')`); se não tiver
+  exatamente 8 dígitos após limpeza → grava mesmo assim (não bloqueia) mas
+  adiciona `'cep_invalido'` a `avisos`.
+- Consistência: se `qtd_aptos` (coluna do CSV) diverge da soma de
+  `secao.aptos` parseadas → adiciona `'qtd_aptos_diverge_soma_secoes'` a
+  `avisos` (não bloqueia; é sinal de CSV inconsistente, fica pro Superadmin
+  avaliar).
+- Geo ausente (`LATITUDE`/`LONGITUDE` vazios) no `ingest`: grava `geo = NULL`,
+  `geo_status = 'pendente'`. Geo presente no CSV: `geo_status =
+  'nao_necessario'`. `tre:geocode` (fase separada) processa quem está
+  `'pendente'`: sucesso → `geo` preenchido + `geo_status = 'sucesso'`; falha →
+  `geo_status = 'falhou'` (fica fora do mapa até correção manual, que grava
+  `geo_status = 'manual'`).
 
 ## RLS
 
@@ -436,46 +509,88 @@ Novas deps: `csv-parse`, `iconv-lite` (produção); `tsx` (dev, runner CLI).
 
 | Arquivo | Responsabilidade |
 |---|---|
-| `normalizar.ts` | Funções puras: `mapTipoLocal`, `mapSituacaoLocal`, `parseSecoes`, `normalizarCep`, `normalizarTexto` (espelha `normalizar_texto` do banco, usado em testes/dry-run) |
+| `normalizar.ts` | Funções puras: `mapTipoLocal`, `mapSituacaoLocal`, `parseSecoes` (tolerante), `normalizarCep`, `normalizarTexto` (espelha `normalizar_texto` do banco), `hashLinha` (SHA-256) |
 | `parse-csv.ts` | Lê CSV como `latin1` (`iconv-lite`), parseia com `csv-parse` (`columns: true`), tipa cada linha |
-| `geocode.ts` | Cliente Nominatim: 1 req/s, timeout, `User-Agent` próprio, retorna `{lat,lng} \| null` |
+| `geocode.ts` | Cliente Nominatim: 1 req/s, timeout, `User-Agent` próprio, retorna `{lat,lng} \| null` — só chamado pela fase `geocode` |
 | `bairros-seed.ts` | Lê `bairros_teresina_final.json`, upsert em `bairro_oficial` por município |
-| `ingest.ts` | Orquestrador CLI (ver pipeline abaixo) |
-| `revisar-staging.ts` | CLI: lista `local_votacao_staging` não revisado; recebe `--id --bairro-oficial-id` (promove) ou `--id --descartar` |
+| `ingest.ts` | Fase `ingest`: parse + match + insere `local_votacao`/`secao`/`staging`; **não geocodifica, não publica** |
+| `revisar-staging.ts` | Fase `revisar`: lista `local_votacao_staging` não revisado; `--id --bairro-oficial-id` (promove) ou `--id --descartar` |
+| `geocode-pendentes.ts` | Fase `geocode`: processa `local_votacao` com `geo_status = 'pendente'` de um `--importacao <id>` |
+| `publicar.ts` | Fase `publicar`: `status → 'publicado'`, roda `detectar_reconciliacao_bairro`; falha se já há outro lote publicado no mesmo município+ano |
+| `despublicar.ts` | `status 'publicado' → 'arquivado'` |
+| `stats.ts` | Lista lotes (`importacao_tre`) e contadores — leitura pura |
+
+CLI (`package.json` scripts): `tre:seed-bairros`, `tre:dry-run`, `tre:ingest`,
+`tre:revisar`, `tre:geocode`, `tre:publicar`, `tre:despublicar`, `tre:stats`.
 
 Fixture de teste: `web/scripts/tre/__fixtures__/tre-sample.csv` (~10 linhas
 cobrindo: convencional com geo, trânsito sem geo, bairro sem match, seção
-múltipla, situação bloqueado).
+múltipla malformada, situação bloqueado, CEP inválido, `qtd_aptos` divergente
+da soma das seções).
 
-### Pipeline de `ingest.ts`
+### Pipeline (fases)
 
-1. Cria `importacao_tre` (`status = 'pendente'`), lê CSV (`parse-csv.ts`).
-2. `status = 'processando'`. Upsert `municipio` (do primeiro `COD_LOCALIDADE_IBGE`/`LOCALIDADE`/`UF`).
-3. Para cada linha: upsert `zona_eleitoral` (município+`ZONA`); RPC
-   `match_bairro_oficial`; se **sem match** → insere em
-   `local_votacao_staging` (`motivo = 'bairro_sem_match'`), próxima linha; se
-   **com match** → monta `local_votacao` (mapeia tipo/situação, calcula
-   `elegivel_calor`, geocodifica se faltar lat/long) + `secao[]` (parse de
-   `SECOES`), insere em transação.
-4. Erro de parse na linha (campo obrigatório ausente/malformado) → insere em
-   `local_votacao_staging` (`motivo = 'erro_parse'`), incrementa
-   `total_erros`, segue.
-5. Ao final: RPC `detectar_reconciliacao_bairro(importacao_id)`; atualiza
-   contadores; `status = 'publicado'`, `publicado_em = now()` (índice único
-   parcial garante que não há outro lote publicado pro mesmo município+ano —
-   se houver, o script falha com instrução de despublicar o antigo antes).
+1. **`tre:seed-bairros`** — upsert `bairro_oficial` a partir do JSON.
+2. **`tre:dry-run --csv <path> --municipio <cod_ibge> --ano <ano>`** — roda
+   parse + match **sem gravar nada**; imprime `{ importaria, staging, erros
+   }`. Reusa a mesma lógica de `ingest.ts` num modo leitura (mesma função,
+   flag `--dry-run`, não `INSERT`).
+3. **`tre:ingest --csv <path> --municipio <cod_ibge> --ano <ano>`** — cria
+   `importacao_tre` (`status='pendente'` → `'processando'`), calcula
+   `arquivo_sha256`/`arquivo_tamanho_bytes`, upsert `municipio`/`zona_eleitoral`,
+   RPC `match_bairro_oficial` por linha: sem match → `local_votacao_staging`
+   (`motivos ⊇ {'bairro_sem_match'}`); com match → INSERT `local_votacao`
+   (`geo_status` conforme presença de lat/long) + `secao[]`. Erro de parse →
+   `local_votacao_staging` (`motivos ⊇ {'erro_parse'}`). Ao final:
+   `status = 'pendente_revisao'`, `log` preenchido (ver Auditoria).
+4. **`tre:revisar`** — lista staging pendente; promove (INSERT em
+   `local_votacao` com o `bairro_oficial_id` escolhido, `geo_status` seguindo
+   a mesma regra do `ingest`) ou descarta.
+5. **`tre:geocode --importacao <id>`** — para cada `local_votacao` com
+   `geo_status='pendente'` do lote: chama Nominatim (1 req/s); sucesso →
+   `geo`+`geo_status='sucesso'`; falha → `geo_status='falhou'`. Reexecutável
+   livremente (só processa quem ainda está `'pendente'` ou, com `--retry`,
+   também `'falhou'`).
+6. **`tre:publicar --importacao <id>`** — exige lote em `'pendente_revisao'`;
+   roda `detectar_reconciliacao_bairro`; `status='publicado'`,
+   `publicado_em=now()`. Falha se já existe outro lote `'publicado'` pro
+   mesmo município+ano (índice único parcial) — instrui rodar
+   `tre:despublicar` no antigo antes. **Não exige** staging zerado nem geocode
+   100% completo — publicar é sobre tornar os locais já curados visíveis, não
+   sobre terminar 100% do trabalho de revisão.
+7. **`tre:despublicar --importacao <id>`** — `'publicado' → 'arquivado'`.
+
+## Auditoria — formato fixo de `importacao_tre.log`
+
+```ts
+type ImportLog = {
+  warnings: string[];
+  errors: string[];
+  duration_ms: number;
+  geocode_calls: number;
+  geocode_failures: number;
+  staging: number;
+  imported: number;
+};
+```
+
+Cada fase (`ingest`, `geocode`, `publicar`) faz merge no mesmo objeto (não
+sobrescreve) — assim o `log` acumula o histórico do lote inteiro, não só da
+última fase rodada.
 
 ## Riscos e defesas em profundidade
 
 | Risco | Defesa |
 |---|---|
 | Encoding errado corrompe nomes/endereços | `latin1` fixo no parser + teste com fixture contendo acento |
-| Fuzzy match falso-positivo funde bairros errados | Limiar 0.4 conservador + staging pra revisão manual, nunca auto-publica sem match |
+| Fuzzy match falso-positivo funde bairros errados | Limiar 0.4 conservador (configurável) + staging pra revisão manual, nunca auto-publica sem match |
 | Import duplicado cria dois lotes "vigentes" | Índice único parcial `WHERE status = 'publicado'` |
-| Geocode externo lento/instável trava o lote inteiro | Falha de geocode não bloqueia a linha — só deixa `geo = NULL`; rate-limit isolado do resto do parse |
+| Geocode externo lento/instável afeta a ingestão | Não afeta — `geocode` é fase separada, nunca roda dentro de `ingest`; falha de geocode só marca `geo_status='falhou'` numa linha isolada |
 | `COD_BAIRRO` vazar pro schema | Nunca lido do CSV parseado (campo nem mapeado em `parse-csv.ts`) |
-| Campanha lê dado de lote não revisado | RLS de `local_votacao`/`secao` exige `status = 'publicado'`; `staging`/`importacao_tre` sem SELECT pra `authenticated` |
+| Campanha lê dado de lote não revisado/não publicado | RLS de `local_votacao`/`secao` exige `status = 'publicado'`; `staging`/`importacao_tre` sem SELECT pra `authenticated` |
 | Reconciliação funde bairro mas apoiador fica "solto" | Documentado como não-objetivo explícito — Pessoa não tem FK de bairro ainda (gap do S2) |
+| CSV do TRE muda de formato num ciclo futuro e quebra o parser silenciosamente | `importer_version` + `row_hash` habilitam diff entre importações; parser de `SECOES` tolerante com warnings em vez de exceção dura |
+| Publicar lote com CSV errado (arquivo trocado) | `arquivo_sha256` prova exatamente qual arquivo gerou o lote, auditável depois |
 
 ## Testes (critério de pronto)
 
@@ -484,47 +599,65 @@ múltipla, situação bloqueado).
 1. `mapTipoLocal`: "CONVENCIONAL"→`convencional`; "VOTO EM TRÂNSITO"→`transito`;
    "PRESO PROVISÓRIO"→`preso_provisorio`; valor desconhecido→`outro`
 2. `mapSituacaoLocal`: "ATIVO"→`ativo`; qualquer outro→`bloqueado`
-3. `parseSecoes`: `"(s: 185, apt: 253), (s: 186, apt: 258)"` → `[{numero:185,aptos:253},{numero:186,aptos:258}]`; string vazia → `[]`
-4. `normalizarCep`: `"64002-510"` e `"64002510"` → `"64002510"`
+3. `parseSecoes`: `"(s: 185, apt: 253), (s: 186, apt: 258)"` →
+   `[{numero:185,aptos:253},{numero:186,aptos:258}]`; string vazia → `[]`;
+   grupo malformado (`"(s: , apt: 10)"`) → ignorado + warning; seção duplicada
+   → mantém primeira + warning
+4. `normalizarCep`: `"64002-510"` e `"64002510"` → `"64002510"`; CEP com 7
+   dígitos → aviso `cep_invalido`
 5. `normalizarTexto`: `"Água Mineral"` → `"agua mineral"` (espelha SQL)
+6. `hashLinha`: mesma linha → mesmo hash; linha com 1 campo diferente → hash
+   diferente
 
 ### Parse de CSV (fixture)
 
-6. Fixture de 10 linhas parseada como `latin1` preserva acentos; linha com
+7. Fixture de 10 linhas parseada como `latin1` preserva acentos; linha com
    `LATITUDE`/`LONGITUDE` vazios tipa como `null`, não `NaN`/string vazia
 
 ### Banco (via `execute_sql`, como S2)
 
-7. `match_bairro_oficial`: nome exato → match; nome com acento/caixa diferente
-   → match (trigram+unaccent); nome sem relação → `NULL`
-8. `elegivel_calor`: convencional+ativo+aptos>0 → true; qualquer variação
-   falsa → false; verdadeiro mesmo com `geo IS NULL`
-9. Bairro sem match: linha cai em `local_votacao_staging`, não aparece em
-   `local_votacao`
-10. Índice único parcial: dois INSERTs `importacao_tre` mesmo
+8. `match_bairro_oficial`: nome exato → match; nome com acento/caixa diferente
+   → match (trigram+unaccent); nome sem relação → `NULL`; `limiar` mais alto
+   reduz matches (testa parametrização)
+9. `elegivel_calor`: convencional+ativo+aptos>0 → true; qualquer variação
+   falsa → false; verdadeiro mesmo com `geo_status='pendente'`
+10. Bairro sem match: linha cai em `local_votacao_staging`, não aparece em
+    `local_votacao`; `bairro_oficial_id` é `NOT NULL` em `local_votacao`
+    (constraint recusa INSERT sem bairro)
+11. Índice único parcial: dois `importacao_tre` mesmo
     município+ano+`status='publicado'` → segundo falha; um `publicado` +
-    outros `pendente/erro` → ok
-11. RLS: `authenticated` lê `local_votacao`/`secao` de lote `publicado`, não lê
-    de lote `pendente`; `authenticated` não lê `importacao_tre` nem
+    outros `pendente_revisao/erro/arquivado` → ok
+12. RLS: `authenticated` lê `local_votacao`/`secao` de lote `publicado`, não lê
+    de lote `pendente_revisao`; `authenticated` não lê `importacao_tre` nem
     `local_votacao_staging`; leitura de `municipio`/`zona_eleitoral`/`bairro_oficial`
     livre pra `authenticated`
-12. `bairro_local`: campanha A não vê `bairro_local` da campanha B (RLS)
-13. `detectar_reconciliacao_bairro`: `bairro_local` similar a `bairro_oficial`
+13. `bairro_local`: campanha A não vê `bairro_local` da campanha B (RLS)
+14. `detectar_reconciliacao_bairro`: `bairro_local` similar a `bairro_oficial`
     publicado gera alerta; sem similaridade suficiente, não gera
-14. `resolver_reconciliacao_bairro('fundido')`: marca `bairro_local.status =
+15. `resolver_reconciliacao_bairro('fundido')`: marca `bairro_local.status =
     'fundido'` e `alerta.resolvido = true`; não toca em `pessoa`
-15. FK `pessoa.secao_id`: INSERT com `secao_id` inexistente → violação de FK;
+16. FK `pessoa.secao_id`: INSERT com `secao_id` inexistente → violação de FK;
     com `secao_id` válido → ok
-16. `get_advisors(security)`: sem alerta novo após 0033 e após 0035
+17. Constraints: `qtd_aptos < 0` → rejeitado; `secao.numero <= 0` → rejeitado;
+    `local_votacao_staging` com `motivos = '{}'` → rejeitado
+18. `get_advisors(security)`: sem alerta novo após 0033 e após 0035
 
-### Integração do script (contra fixture, banco real de teste)
+### Integração dos scripts (contra fixture, banco real de teste)
 
-17. `tre:ingest` sobre a fixture completa: contadores finais de
+19. `tre:dry-run` não grava nada no banco (conta linhas antes/depois de rodar
+    e compara)
+20. `tre:ingest` sobre a fixture completa: contadores finais de
     `importacao_tre` batem (`total_linhas = total_publicados + total_staging +
-    total_erros`); linha de trânsito sem geo publica com `elegivel_calor =
-    false` (situação/tipo não elegível) e `geo = NULL` ou geocodada
-18. `tre:revisar --id X --bairro-oficial-id Y`: promove staging → aparece em
+    total_erros`); lote termina em `status='pendente_revisao'` (não publica
+    sozinho); linha de trânsito sem geo grava `geo_status='pendente'`
+21. `tre:revisar --id X --bairro-oficial-id Y`: promove staging → aparece em
     `local_votacao` com o bairro escolhido; `revisado = true`
+22. `tre:geocode` só processa `geo_status='pendente'`; roda de novo sem
+    `--retry` não reprocessa quem já é `'falhou'`
+23. `tre:publicar`: lote vira `'publicado'`; tentar publicar um 2º lote do
+    mesmo município+ano falha até `tre:despublicar` o primeiro
+24. `tre:despublicar`: `'publicado'→'arquivado'` libera o índice único parcial
+    pra um novo `tre:publicar` de outro lote
 
 ## Notas para S4 e além (mapas)
 
