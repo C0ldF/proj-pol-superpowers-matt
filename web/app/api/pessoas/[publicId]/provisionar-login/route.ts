@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { ssrClient } from '../../../../../lib/supabase/ssr';
@@ -5,7 +6,7 @@ import { adminClient } from '../../../../../lib/supabase/server';
 
 function gerarSenhaTemporaria(): string {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
-  return Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  return Array.from({ length: 12 }, () => chars[randomInt(chars.length)]).join('');
 }
 
 export async function POST(
