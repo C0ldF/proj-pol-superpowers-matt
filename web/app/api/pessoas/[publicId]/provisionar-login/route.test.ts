@@ -10,6 +10,18 @@ vi.mock('../../../../../lib/supabase/ssr', () => ({
         error: null,
       })),
     },
+    from: vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          eq: vi.fn(() => ({
+            single: vi.fn(async () => ({
+              data: { id: 'pes-uuid-1', cpf_hmac: 'hash-cpf' },
+              error: null,
+            })),
+          })),
+        })),
+      })),
+    })),
   })),
 }));
 
@@ -70,5 +82,38 @@ describe('POST /api/pessoas/:publicId/provisionar-login', () => {
     } as never);
     const res = await POST(req({ email: 'x@x.com' }), { params: Promise.resolve({ publicId: 'pes_abc' }) });
     expect(res.status).toBe(403);
+  });
+
+  it('500 e rollback quando rpc falha', async () => {
+    const deleteUserSpy = vi.fn(async () => ({ data: {}, error: null }));
+    const { adminClient } = await import('../../../../../lib/supabase/server');
+    vi.mocked(adminClient).mockReturnValueOnce({
+      from: vi.fn(() => ({
+        select: vi.fn(() => ({
+          eq: vi.fn(() => ({
+            eq: vi.fn(() => ({
+              single: vi.fn(async () => ({
+                data: { id: 'pes-uuid-1', cpf_hmac: 'hash-cpf' },
+                error: null,
+              })),
+            })),
+          })),
+        })),
+      })),
+      auth: {
+        admin: {
+          createUser: vi.fn(async () => ({
+            data: { user: { id: 'new-user-id' } },
+            error: null,
+          })),
+          deleteUser: deleteUserSpy,
+        },
+      },
+      rpc: vi.fn(async () => ({ error: { message: 'db error' } })),
+    } as never);
+
+    const res = await POST(req({ email: 'joao@teste.com' }), { params: Promise.resolve({ publicId: 'pes_abc' }) });
+    expect(res.status).toBe(500);
+    expect(deleteUserSpy).toHaveBeenCalledWith('new-user-id');
   });
 });

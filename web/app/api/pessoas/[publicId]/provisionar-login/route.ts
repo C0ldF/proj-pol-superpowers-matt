@@ -32,15 +32,15 @@ export async function POST(
   }
   if (!body.email) return NextResponse.json({ erro: 'email obrigatório' }, { status: 400 });
 
-  const admin = adminClient();
-
-  // resolve UUID interno pelo public_id
-  const { data: pessoa, error: pessoaErr } = await admin
+  // resolve UUID interno pelo public_id (ssrClient: RLS garante campanha_id do token)
+  const { data: pessoa, error: pessoaErr } = await supabase
     .from('pessoa')
     .select('id, cpf_hmac')
     .eq('public_id', publicId)
     .eq('campanha_id', campanha_id)
     .single();
+
+  const admin = adminClient();
 
   if (pessoaErr || !pessoa) {
     return NextResponse.json({ erro: 'pessoa não encontrada' }, { status: 404 });
