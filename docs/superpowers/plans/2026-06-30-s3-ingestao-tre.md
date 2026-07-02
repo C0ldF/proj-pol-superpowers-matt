@@ -3897,3 +3897,266 @@ própria verificação via `execute_sql` ou Vitest. Checklist de conferência:
 - [ ] Item 18 (`get_advisors`) — Tasks 7, 9, 20
 - [ ] Itens 19–24 (integração dos scripts) — Tasks 16, 17, 18, 19, 20
 
+---
+
+## Erratum pós-Task 20: NUM_LOCAL só é único dentro da zona (descoberto rodando o CSV real)
+
+Task 20 (rodando os 3555 registros reais, não a fixture de 10 linhas) travou:
+`local_votacao_unico UNIQUE (importacao_id, num_local)` não inclui `zona_id`,
+mas no TRE real `NUM_LOCAL` só é único **dentro de uma zona eleitoral**.
+Quantificado contra o CSV real inteiro: **169** valores de `num_local`
+colidem entre zonas diferentes (resolvido só com `zona_id` na constraint);
+**30** colidem mesmo dentro da mesma zona — locais genuinamente distintos
+(nomes/bairros diferentes, ambos `ATIVO`), que `zona_id` sozinho não resolve.
+A fixture de 10 linhas (Task 12) nunca exercitou isso — pequena demais pra
+cobrir múltiplas zonas com números repetidos. Decisão do usuário: corrigir a
+constraint (Task 21) + mandar as 30 colisões reais pra staging em vez de
+tentar resolver automaticamente (Task 22), consistente com a filosofia de
+curadoria do pipeline inteiro (ADR 0011).
+
+### Task 21: Corrigir `local_votacao_unico` para incluir `zona_id` (migration 0038)
+
+**Files:**
+- Create: `supabase/migrations/0038_local_votacao_zona_fix.sql`
+
+**Interfaces:**
+- Consumes: `local_votacao` (Task 4)
+- Produces: `local_votacao_unico` agora `UNIQUE (importacao_id, zona_id, num_local)`
+
+- [ ] **Step 1: Verificar a constraint atual (2 colunas, sem zona_id)**
+
+```sql
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid = 'public.local_votacao'::regclass AND conname = 'local_votacao_unico';
+```
+Esperado: `UNIQUE (importacao_id, num_local)`.
+
+- [ ] **Step 2: Criar e aplicar migration 0038**
+
+`supabase/migrations/0038_local_votacao_zona_fix.sql`:
+```sql
+-- Erratum descoberto no Task 20 rodando o CSV real do TRE: NUM_LOCAL só é
+-- único DENTRO de uma zona eleitoral, não no município inteiro. A constraint
+-- original (0029) não incluía zona_id — 169 dos 3555 registros reais
+-- colidiam entre zonas diferentes e travavam o ingest com 23505.
+ALTER TABLE public.local_votacao DROP CONSTRAINT local_votacao_unico;
+ALTER TABLE public.local_votacao
+  ADD CONSTRAINT local_votacao_unico UNIQUE (importacao_id, zona_id, num_local);
+```
+
+Aplicar via `mcp__supabase__apply_migration` (`name: "local_votacao_zona_fix"`).
+
+- [ ] **Step 3: Verificar a nova constraint (3 colunas)**
+
+```sql
+SELECT pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid = 'public.local_votacao'::regclass AND conname = 'local_votacao_unico';
+```
+Esperado: `UNIQUE (importacao_id, zona_id, num_local)`.
+
+- [ ] **Step 4: Verificar que o mesmo `num_local` em zonas diferentes agora funciona**
+
+```sql
+INSERT INTO public.importacao_tre (municipio_id, uf, ano, status, importer_version)
+VALUES (2211001, 'PI', 2093, 'pendente', 's3.0-test') RETURNING id;
+-- guardar como <lote_teste>
+INSERT INTO public.zona_eleitoral (municipio_id, numero) VALUES (2211001, 996) RETURNING id;
+-- guardar como <zona_a>
+INSERT INTO public.zona_eleitoral (municipio_id, numero) VALUES (2211001, 995) RETURNING id;
+-- guardar como <zona_b>
+SELECT id FROM public.bairro_oficial WHERE municipio_id = 2211001 LIMIT 1;
+-- guardar como <bairro_qualquer>
+
+INSERT INTO public.local_votacao (
+  importacao_id, zona_id, bairro_oficial_id, bairro_nome_original,
+  num_local, nome, tipo, situacao, qtd_aptos, row_hash
+) VALUES
+  ('<lote_teste>', '<zona_a>', '<bairro_qualquer>', 'Teste', 5000, 'Local A', 'convencional', 'ativo', 10, 'hash-a'),
+  ('<lote_teste>', '<zona_b>', '<bairro_qualquer>', 'Teste', 5000, 'Local B', 'convencional', 'ativo', 10, 'hash-b');
+-- esperado: AMBOS inserem com sucesso (mesmo num_local=5000, zonas diferentes)
+```
+
+- [ ] **Step 5: Verificar que o mesmo `num_local` na MESMA zona ainda é rejeitado**
+
+```sql
+INSERT INTO public.local_votacao (
+  importacao_id, zona_id, bairro_oficial_id, bairro_nome_original,
+  num_local, nome, tipo, situacao, qtd_aptos, row_hash
+) VALUES ('<lote_teste>', '<zona_a>', '<bairro_qualquer>', 'Teste', 5000, 'Local A Duplicado', 'convencional', 'ativo', 10, 'hash-c');
+-- esperado: ERROR duplicate key value violates unique constraint "local_votacao_unico"
+```
+
+- [ ] **Step 6: Limpar dados de teste**
+
+```sql
+DELETE FROM public.local_votacao WHERE importacao_id = '<lote_teste>';
+DELETE FROM public.zona_eleitoral WHERE numero IN (996, 995) AND municipio_id = 2211001;
+DELETE FROM public.importacao_tre WHERE id = '<lote_teste>';
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add supabase/migrations/0038_local_votacao_zona_fix.sql
+git commit -m "fix(s3): local_votacao_unico missing zona_id — NUM_LOCAL only unique within a zona in real TRE data (0038)"
+```
+
+---
+
+### Task 22: `ingest.ts` — colisões reais de zona+num_local vão pra staging
+
+**Files:**
+- Modify: `web/scripts/tre/ingest.ts`
+- Modify: `web/scripts/tre/ingest.test.ts`
+
+**Interfaces:**
+- Consumes: `local_votacao_unico` corrigida (Task 21)
+- Produces: `ingerirLote` agora detecta, dentro do próprio CSV sendo processado, uma segunda linha com a mesma `zona`+`num_local` de uma já processada, e manda pra staging com `motivos: ['num_local_duplicado_mesma_zona']` em vez de tentar inserir (o que colidiria com a constraint mesmo corrigida — essas são as 30 colisões reais, locais genuinamente distintos, que `zona_id` sozinho não resolve)
+
+- [ ] **Step 1: Escrever os 2 novos testes**
+
+Adicionar a `web/scripts/tre/ingest.test.ts` (mesmos helpers `linha`/`makeDeps`/`baseInput` já existentes no arquivo):
+```typescript
+it('segunda linha com mesma zona+num_local vira staging com num_local_duplicado_mesma_zona, sem chamar match', async () => {
+  const deps = makeDeps();
+  const linhaA = linha({ numLocal: '5', zona: '2' });
+  const linhaB = linha({ numLocal: '5', zona: '2', localVotacao: 'OUTRO LOCAL' });
+  const r = await ingerirLote({ ...baseInput, linhas: [linhaA, linhaB] }, deps);
+
+  expect(r.totalPublicados).toBe(1);
+  expect(r.totalStaging).toBe(1);
+  expect(deps.inserirStaging).toHaveBeenCalledWith(
+    expect.objectContaining({ motivos: ['num_local_duplicado_mesma_zona'] }),
+  );
+  expect(deps.matchBairroOficial).toHaveBeenCalledTimes(1);
+});
+
+it('mesma num_local em zonas diferentes NÃO é tratada como duplicata', async () => {
+  const deps = makeDeps();
+  const linhaA = linha({ numLocal: '7', zona: '1' });
+  const linhaB = linha({ numLocal: '7', zona: '2' });
+  const r = await ingerirLote({ ...baseInput, linhas: [linhaA, linhaB] }, deps);
+
+  expect(r.totalPublicados).toBe(2);
+  expect(r.totalStaging).toBe(0);
+  expect(deps.matchBairroOficial).toHaveBeenCalledTimes(2);
+});
+```
+
+- [ ] **Step 2: Rodar teste — verificar FALHA**
+
+```bash
+cd web && npx vitest run scripts/tre/ingest.test.ts
+```
+Esperado: os 2 novos testes falham (contagens erradas / `inserirStaging` não chamado com o motivo certo); os 6 testes antigos continuam passando.
+
+- [ ] **Step 3: Implementar a detecção — editar `ingerirLote` em `ingest.ts`**
+
+Dentro de `ingerirLote`, logo depois de declarar `totalPublicados`/`totalStaging`/`totalErros`/`importacaoId`, adicionar:
+```typescript
+  const vistoZonaNumLocal = new Set<string>();
+```
+
+E dentro do `for (const linhaCrua of input.linhas)`, entre o bloco de `erro_parse` (required fields) e a chamada de `deps.matchBairroOficial`, inserir:
+```typescript
+    // NUM_LOCAL só é único dentro da zona eleitoral no TRE real (erratum
+    // pós-Task 20 — 30 colisões reais confirmadas em locais genuinamente
+    // distintos). Segunda ocorrência da mesma zona+num_local nesta
+    // importação vai pra staging pra revisão manual, nunca auto-resolvida.
+    const chaveZonaNumLocal = `${preparado.zonaNumero}:${preparado.numLocal}`;
+    if (vistoZonaNumLocal.has(chaveZonaNumLocal)) {
+      totalStaging++;
+      if (!dryRun && importacaoId) {
+        await deps.inserirStaging({
+          importacaoId,
+          linhaOriginal: linhaCrua,
+          rowHash: preparado.rowHash,
+          motivos: ['num_local_duplicado_mesma_zona'],
+        });
+      }
+      continue;
+    }
+    vistoZonaNumLocal.add(chaveZonaNumLocal);
+```
+
+(O restante da função — chamada a `matchBairroOficial`, ramos de staging/publicado, atualização final de status — não muda.)
+
+- [ ] **Step 4: Rodar teste — verificar PASSA**
+
+```bash
+cd web && npx vitest run scripts/tre/ingest.test.ts
+```
+Esperado: 8/8 passam (6 antigos + 2 novos).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/scripts/tre/ingest.ts web/scripts/tre/ingest.test.ts
+git commit -m "fix(s3): route same-zona duplicate NUM_LOCAL to staging instead of crashing the unique constraint"
+```
+
+---
+
+### Task 23: Rerodar a ingestão real (Task 20, retomada) + finalizar README/commit/memória
+
+**Files:**
+- Modify: `web/scripts/tre/README.md` (já escrito pela Task 20 anterior, uncommitted — confirmar conteúdo, adicionar 1 linha sobre o motivo novo se fizer sentido)
+
+**Interfaces:**
+- Consumes: constraint corrigida (Task 21), `ingerirLote` com dedupe (Task 22)
+
+- [ ] **Step 1: Confirmar `importacao_tre` limpo para município 2211001 + ano 2026**
+
+```sql
+SELECT count(*) FROM public.importacao_tre WHERE municipio_id = 2211001 AND ano = 2026;
+```
+Esperado: `0` (a Task 20 anterior já limpou os dois incidentes).
+
+- [ ] **Step 2: Rodar `tre:dry-run` de novo (sanity check pós-fix)**
+
+```bash
+cd web && npx tsx --env-file=.env.local scripts/tre/cli/dry-run.ts --csv "D:\projeto-pol-superpowers\4a-ad1b-420e-9d99-aa785ee2386b.csv" --municipio 2211001 --ano 2026
+```
+Esperado: mesma contagem de `linhas`/`importaria`/`staging`/`erros` da rodada anterior (dry-run não muda com a correção — ela só afeta o INSERT real; as 30 colisões mesma-zona ainda contam como "importaria" no dry-run porque o dry-run não simula a detecção de duplicata dentro do próprio lote, só o match de bairro — **isso é esperado, não é regressão**: documentar a diferença no relatório).
+
+- [ ] **Step 3: Rodar `tre:ingest` real — dessa vez até o fim**
+
+```bash
+cd web && npx tsx --env-file=.env.local scripts/tre/cli/ingest.ts --csv "D:\projeto-pol-superpowers\4a-ad1b-420e-9d99-aa785ee2386b.csv" --municipio 2211001 --ano 2026 --operador "$(whoami)"
+```
+Esperado: termina sem erro 23505 desta vez; imprime `importacao <uuid>: linhas=3555 publicados=<N> staging=<M> erros=0` com `N+M=3555`. `M` deve ser maior que na tentativa anterior (soma dos que não casaram bairro + as 30 colisões mesma-zona, que agora também contam como staging).
+
+- [ ] **Step 4: Verificar via `execute_sql`**
+
+```sql
+SELECT status, total_linhas, total_publicados, total_staging, total_erros FROM public.importacao_tre
+ WHERE municipio_id = 2211001 AND ano = 2026;
+-- esperado: status='pendente_revisao'; soma bate
+
+SELECT unnest(motivos) AS motivo, count(*) FROM public.local_votacao_staging
+ WHERE importacao_id = (SELECT id FROM public.importacao_tre WHERE municipio_id=2211001 AND ano=2026)
+ GROUP BY motivo ORDER BY count(*) DESC;
+-- esperado: inclui 'num_local_duplicado_mesma_zona' com contagem próxima de 30
+-- (pode ser menor que 30 se algum dos pares também tiver bairro sem match —
+-- nesse caso cai em bairro_sem_match primeiro, não é dupla contagem)
+```
+
+- [ ] **Step 5: `get_advisors(security)` final**
+
+Via MCP. Esperado: mesmo estado da Task 20 anterior, sem alerta novo.
+
+- [ ] **Step 6: Confirmar/ajustar README e commitar**
+
+Revisar `web/scripts/tre/README.md` (já no disco desde a tentativa anterior da Task 20) — confirma que bate com o conteúdo do brief original da Task 20. Opcional: acrescentar `num_local_duplicado_mesma_zona` à lista de motivos de staging, já que agora é um motivo real do pipeline.
+
+```bash
+git add web/scripts/tre/README.md
+git commit -m "docs(s3): TRE pipeline README + real ingest of Teresina 2026 (pendente_revisao)"
+```
+
+**Não publicar nem geocodificar o lote real** — fica em `pendente_revisao`, decisão do Superadmin (mesma regra da Task 20 original).
+
+- [ ] **Step 7: Atualizar memória do projeto**
+
+Mesma nota da Task 20 original: S3 completo, dado real de Teresina 2026 ingerido e aguardando revisão do Superadmin. Acrescentar: erratum pós-lançamento corrigido (constraint `zona_id` + dedupe mesma-zona pra staging), descoberto só ao rodar dado real — reforça pra próximas fatias sempre incluir pelo menos um teste de integração com uma amostra maior/mais realista do dado real, não só a fixture mínima de 10 linhas.
+
