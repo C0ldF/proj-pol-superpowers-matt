@@ -4,7 +4,7 @@
 
 **Goal:** Construir o pipeline curado de ingestão do cadastro TRE (municípios, zonas, bairros oficiais, locais de votação, seções) em tabelas globais relacionais + PostGIS, com fuzzy match de bairro, geocode assíncrono, staging de revisão e reconciliação com `bairro_local` de campanha — via scripts CLI server-side em fases explícitas (`dry-run → ingest → revisar → geocode → publicar → despublicar`).
 
-**Architecture:** 14 migrations Postgres (0023–0036) criam extensões (`pg_trgm`, `unaccent`), 6 enums, 9 tabelas globais/overlay e 4 funções `SECURITY DEFINER`. Camada de scripts em `web/scripts/tre/` segue o padrão de injeção de dependências já usado no S2 (função pura orquestradora + `build*Deps` que injeta `adminClient()`), com um wrapper CLI fino por fase em `web/scripts/tre/cli/`.
+**Architecture:** 15 migrations Postgres (0023–0037 — one extra vs. the original 14, see Task 7's RLS fix) criam extensões (`pg_trgm`, `unaccent`), 6 enums, 9 tabelas globais/overlay e 4 funções `SECURITY DEFINER`. Camada de scripts em `web/scripts/tre/` segue o padrão de injeção de dependências já usado no S2 (função pura orquestradora + `build*Deps` que injeta `adminClient()`), com um wrapper CLI fino por fase em `web/scripts/tre/cli/`.
 
 **Tech Stack:** PostgreSQL 17 + PostGIS (Supabase cloud `axcftjqdjvknrpqzrxls`), Node.js `tsx` (CLI runner), TypeScript, Vitest 4, `csv-parse`, `iconv-lite`, `@supabase/supabase-js`, Nominatim/OSM (geocode HTTP).
 
@@ -42,9 +42,10 @@
 | `supabase/migrations/0031_local_votacao_staging.sql` | Tabela `local_votacao_staging` + GIN |
 | `supabase/migrations/0032_funcoes_match_bairro.sql` | `normalizar_texto`, `match_bairro_oficial` |
 | `supabase/migrations/0033_tre_rls.sql` | RLS em 0025–0031 |
-| `supabase/migrations/0034_bairro_local.sql` | Tabela `bairro_local` + RLS |
-| `supabase/migrations/0035_reconciliacao_bairro.sql` | `bairro_reconciliacao_alerta` + `detectar_reconciliacao_bairro` + `resolver_reconciliacao_bairro` + RLS |
-| `supabase/migrations/0036_pessoa_secao_fk.sql` | FK `pessoa.secao_id → secao(id)` |
+| `supabase/migrations/0034_tre_rls_publish_check_fix.sql` | **Correção descoberta na execução (Task 7):** `local_votacao_select`/`secao_select` checavam `importacao_tre.status` via `EXISTS` direto — mas `importacao_tre` é deny-all pra `authenticated`, então o `EXISTS` nunca via a linha e a política nunca liberava nada. Fix: função `importacao_esta_publicada(uuid)` `SECURITY DEFINER` (bypassa a RLS de `importacao_tre` internamente) com `GRANT EXECUTE` pra `authenticated`; `secao_select` passou a delegar pra RLS de `local_votacao` em vez de duplicar o check. |
+| `supabase/migrations/0035_bairro_local.sql` | Tabela `bairro_local` + RLS |
+| `supabase/migrations/0036_reconciliacao_bairro.sql` | `bairro_reconciliacao_alerta` + `detectar_reconciliacao_bairro` + `resolver_reconciliacao_bairro` + RLS |
+| `supabase/migrations/0037_pessoa_secao_fk.sql` | FK `pessoa.secao_id → secao(id)` |
 
 ### Scripts — núcleo puro
 | Arquivo | Responsabilidade |
@@ -861,12 +862,52 @@ git add supabase/migrations/0033_tre_rls.sql
 git commit -m "feat(s3): RLS on TRE reference tables — global read, publish-gated local_votacao/secao (0033)"
 ```
 
+- [ ] **Step 10 (descoberto durante a execução): corrigir `local_votacao_select`/`secao_select` — o `EXISTS` direto em `importacao_tre` nunca é satisfeito**
+
+Verificação live (INSERT de um lote `publicado` de teste + `SET LOCAL ROLE authenticated` + SELECT) mostrou 0 linhas mesmo com o lote publicado. Causa: `importacao_tre` é deny-all pra `authenticated` (Task 3) — o `EXISTS (SELECT 1 FROM public.importacao_tre ...)` dentro da policy de `local_votacao` roda com o mesmo papel da query externa, então a RLS de `importacao_tre` bloqueia a subquery antes mesmo do `WHERE status = 'publicado'` ser avaliado. A policy nunca liberava nada, publicado ou não.
+
+`supabase/migrations/0034_tre_rls_publish_check_fix.sql`:
+```sql
+CREATE OR REPLACE FUNCTION public.importacao_esta_publicada(p_importacao_id uuid)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.importacao_tre
+     WHERE id = p_importacao_id AND status = 'publicado'
+  );
+$$;
+REVOKE ALL ON FUNCTION public.importacao_esta_publicada(uuid) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.importacao_esta_publicada(uuid) TO authenticated;
+
+DROP POLICY "local_votacao_select" ON public.local_votacao;
+CREATE POLICY "local_votacao_select" ON public.local_votacao
+  FOR SELECT TO authenticated
+  USING (public.importacao_esta_publicada(importacao_id));
+
+DROP POLICY "secao_select" ON public.secao;
+CREATE POLICY "secao_select" ON public.secao
+  FOR SELECT TO authenticated
+  USING (
+    EXISTS (SELECT 1 FROM public.local_votacao l WHERE l.id = secao.local_id)
+  );
+```
+
+`importacao_esta_publicada` é `SECURITY DEFINER` — roda com privilégio elevado internamente, então consegue ler `importacao_tre` mesmo com a RLS dessa tabela bloqueando `authenticated`; `GRANT EXECUTE ... TO authenticated` é necessário (diferente das funções de match, que revogam de `authenticated`) porque é `authenticated` quem avalia a policy. `secao_select` passou a delegar pra RLS de `local_votacao` (que já é publish-gated) em vez de duplicar o `EXISTS` — mais simples e sem o mesmo bug.
+
+Reverificado ao vivo: lote `pendente_revisao` → `local_votacao`/`secao` = 0 linhas pra `authenticated`; lote `publicado` → 1/1; `importacao_tre` continua 0 (deny-all intacto). `get_advisors(security)`: um novo WARN esperado — `importacao_esta_publicada` é uma `SECURITY DEFINER` function chamável por `authenticated` via RPC; intencional (só retorna um boolean de status de publicação, sem dado sensível) e necessário pro fix funcionar.
+
+```bash
+git add supabase/migrations/0034_tre_rls_publish_check_fix.sql
+git commit -m "fix(s3): local_votacao/secao RLS never allowed access — importacao_esta_publicada() bypasses importacao_tre's deny-all (0034)"
+```
+
 ---
 
-### Task 8: bairro_local — overlay de campanha (migration 0034)
+### Task 8: bairro_local — overlay de campanha (migration 0035)
 
 **Files:**
-- Create: `supabase/migrations/0034_bairro_local.sql`
+- Create: `supabase/migrations/0035_bairro_local.sql`
 
 **Interfaces:**
 - Consumes: `campanha` (S0), `bairro_oficial` (Task 2), `status_bairro_local_enum` (Task 1)
@@ -881,7 +922,7 @@ Esperado: 0 linhas.
 
 - [ ] **Step 2: Criar e aplicar migration 0034**
 
-`supabase/migrations/0034_bairro_local.sql`:
+`supabase/migrations/0035_bairro_local.sql`:
 ```sql
 CREATE TABLE public.bairro_local (
   id                          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -959,8 +1000,8 @@ DELETE FROM public.bairro_local WHERE nome_normalizado = 'bairro da campanha a';
 - [ ] **Step 6: Commit**
 
 ```bash
-git add supabase/migrations/0034_bairro_local.sql
-git commit -m "feat(s3): bairro_local campaign overlay table with tenant RLS (0034)"
+git add supabase/migrations/0035_bairro_local.sql
+git commit -m "feat(s3): bairro_local campaign overlay table with tenant RLS (0035)"
 ```
 
 ---
@@ -968,7 +1009,7 @@ git commit -m "feat(s3): bairro_local campaign overlay table with tenant RLS (00
 ### Task 9: Reconciliação de bairro (migration 0035)
 
 **Files:**
-- Create: `supabase/migrations/0035_reconciliacao_bairro.sql`
+- Create: `supabase/migrations/0036_reconciliacao_bairro.sql`
 
 **Interfaces:**
 - Consumes: `bairro_local` (Task 8), `bairro_oficial` (Task 2), `importacao_tre` (Task 3), `status_reconciliacao_enum` (Task 1)
@@ -976,7 +1017,7 @@ git commit -m "feat(s3): bairro_local campaign overlay table with tenant RLS (00
 
 - [ ] **Step 1: Criar e aplicar migration 0035**
 
-`supabase/migrations/0035_reconciliacao_bairro.sql`:
+`supabase/migrations/0036_reconciliacao_bairro.sql`:
 ```sql
 CREATE TABLE public.bairro_reconciliacao_alerta (
   id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1145,8 +1186,8 @@ Via MCP. Registrar resultado no relatório da task.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add supabase/migrations/0035_reconciliacao_bairro.sql
-git commit -m "feat(s3): bairro reconciliation alert table + detect/resolve functions (0035)"
+git add supabase/migrations/0036_reconciliacao_bairro.sql
+git commit -m "feat(s3): bairro reconciliation alert table + detect/resolve functions (0036)"
 ```
 
 ---
@@ -1154,7 +1195,7 @@ git commit -m "feat(s3): bairro reconciliation alert table + detect/resolve func
 ### Task 10: FK real `pessoa.secao_id` (migration 0036)
 
 **Files:**
-- Create: `supabase/migrations/0036_pessoa_secao_fk.sql`
+- Create: `supabase/migrations/0037_pessoa_secao_fk.sql`
 
 **Interfaces:**
 - Consumes: `secao` (Task 5), `pessoa.secao_id` (coluna solta desde S2, migration 0014)
@@ -1169,7 +1210,7 @@ Esperado: 0 linhas.
 
 - [ ] **Step 2: Criar e aplicar migration 0036**
 
-`supabase/migrations/0036_pessoa_secao_fk.sql`:
+`supabase/migrations/0037_pessoa_secao_fk.sql`:
 ```sql
 ALTER TABLE public.pessoa
   ADD CONSTRAINT pessoa_secao_id_fkey FOREIGN KEY (secao_id) REFERENCES public.secao(id);
@@ -1213,8 +1254,8 @@ DELETE FROM public.pessoa WHERE nome = 'Teste FK Secao Null';
 - [ ] **Step 7: Commit**
 
 ```bash
-git add supabase/migrations/0036_pessoa_secao_fk.sql
-git commit -m "feat(s3): pessoa.secao_id gets real FK to secao(id), closing S2 gap (0036)"
+git add supabase/migrations/0037_pessoa_secao_fk.sql
+git commit -m "feat(s3): pessoa.secao_id gets real FK to secao(id), closing S2 gap (0037)"
 ```
 
 ---

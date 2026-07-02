@@ -361,11 +361,12 @@ bairro); btree em `row_hash`.
 | 0031 | `local_votacao_staging` | tabela + GIN |
 | 0032 | `funcoes_match_bairro` | `normalizar_texto`, `match_bairro_oficial` (limiar parametrizável) |
 | 0033 | `tre_rls` | RLS em 0025–0031 |
-| 0034 | `bairro_local` | tabela + RLS |
-| 0035 | `reconciliacao_bairro` | `bairro_reconciliacao_alerta` + `detectar_reconciliacao_bairro` + `resolver_reconciliacao_bairro` + RLS |
-| 0036 | `pessoa_secao_fk` | `ALTER TABLE pessoa ADD CONSTRAINT ... FOREIGN KEY (secao_id) REFERENCES secao(id)` |
+| 0034 | `tre_rls_publish_check_fix` | **Erratum, descoberto na execução:** o `EXISTS` direto em `importacao_tre` dentro de `local_votacao_select`/`secao_select` nunca é satisfeito, porque `importacao_tre` é deny-all pra `authenticated` e a subquery roda com o mesmo papel — a RLS bloqueia a subquery antes do `status='publicado'` ser avaliado. Fix: função `importacao_esta_publicada(uuid)` `SECURITY DEFINER` (bypassa a RLS de `importacao_tre` internamente) + `GRANT EXECUTE` pra `authenticated`; `secao_select` passa a delegar pra RLS de `local_votacao` em vez de duplicar o check. |
+| 0035 | `bairro_local` | tabela + RLS |
+| 0036 | `reconciliacao_bairro` | `bairro_reconciliacao_alerta` + `detectar_reconciliacao_bairro` + `resolver_reconciliacao_bairro` + RLS |
+| 0037 | `pessoa_secao_fk` | `ALTER TABLE pessoa ADD CONSTRAINT ... FOREIGN KEY (secao_id) REFERENCES secao(id)` |
 
-`get_advisors(type=security)` após 0033 e após 0035 — pontos de verificação
+`get_advisors(type=security)` após 0034 e após 0036 — pontos de verificação
 intermediária.
 
 ## Funções
@@ -640,7 +641,7 @@ sobrescreve) — assim o `log` acumula o histórico do lote inteiro, não só da
     com `secao_id` válido → ok
 17. Constraints: `qtd_aptos < 0` → rejeitado; `secao.numero <= 0` → rejeitado;
     `local_votacao_staging` com `motivos = '{}'` → rejeitado
-18. `get_advisors(security)`: sem alerta novo após 0033 e após 0035
+18. `get_advisors(security)`: sem alerta novo após 0034 e após 0036 (um WARN esperado e intencional aparece após 0034: `importacao_esta_publicada` é `SECURITY DEFINER` chamável por `authenticated` via RPC — necessário pro fix de RLS funcionar, sem exposição de dado sensível)
 
 ### Integração dos scripts (contra fixture, banco real de teste)
 
