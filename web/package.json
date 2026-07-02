@@ -7,11 +7,21 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "tre:seed-bairros": "tsx scripts/tre/cli/seed-bairros.ts",
+    "tre:dry-run": "tsx scripts/tre/cli/dry-run.ts",
+    "tre:ingest": "tsx scripts/tre/cli/ingest.ts",
+    "tre:revisar": "tsx scripts/tre/cli/revisar.ts",
+    "tre:geocode": "tsx scripts/tre/cli/geocode.ts",
+    "tre:publicar": "tsx scripts/tre/cli/publicar.ts",
+    "tre:despublicar": "tsx scripts/tre/cli/despublicar.ts",
+    "tre:stats": "tsx scripts/tre/cli/stats.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.108.2",
+    "csv-parse": "^7.0.0",
+    "iconv-lite": "^0.7.2",
     "next": "16.2.9",
     "react": "19.2.4",
     "react-dom": "19.2.4"
@@ -22,6 +32,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
+    "tsx": "^4.22.4",
     "typescript": "^5",
     "vitest": "^4.1.9"
   }
