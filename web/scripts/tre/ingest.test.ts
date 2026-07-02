@@ -97,4 +97,29 @@ describe('ingerirLote', () => {
     );
     expect(chamada?.[1].status).toBe('pendente_revisao');
   });
+
+  it('segunda linha com mesma zona+num_local vira staging com num_local_duplicado_mesma_zona, sem chamar match', async () => {
+    const deps = makeDeps();
+    const linhaA = linha({ numLocal: '5', zona: '2' });
+    const linhaB = linha({ numLocal: '5', zona: '2', localVotacao: 'OUTRO LOCAL' });
+    const r = await ingerirLote({ ...baseInput, linhas: [linhaA, linhaB] }, deps);
+
+    expect(r.totalPublicados).toBe(1);
+    expect(r.totalStaging).toBe(1);
+    expect(deps.inserirStaging).toHaveBeenCalledWith(
+      expect.objectContaining({ motivos: ['num_local_duplicado_mesma_zona'] }),
+    );
+    expect(deps.matchBairroOficial).toHaveBeenCalledTimes(1);
+  });
+
+  it('mesma num_local em zonas diferentes NÃO é tratada como duplicata', async () => {
+    const deps = makeDeps();
+    const linhaA = linha({ numLocal: '7', zona: '1' });
+    const linhaB = linha({ numLocal: '7', zona: '2' });
+    const r = await ingerirLote({ ...baseInput, linhas: [linhaA, linhaB] }, deps);
+
+    expect(r.totalPublicados).toBe(2);
+    expect(r.totalStaging).toBe(0);
+    expect(deps.matchBairroOficial).toHaveBeenCalledTimes(2);
+  });
 });

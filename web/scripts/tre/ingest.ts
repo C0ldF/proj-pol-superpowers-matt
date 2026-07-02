@@ -62,6 +62,7 @@ export async function ingerirLote(
   let totalStaging = 0;
   let totalErros = 0;
   let importacaoId: string | null = null;
+  const vistoZonaNumLocal = new Set<string>();
 
   if (!dryRun) {
     await deps.upsertMunicipio({ codIbge: input.municipioId, nome: input.municipioNome, uf: input.uf });
@@ -95,6 +96,25 @@ export async function ingerirLote(
       }
       continue;
     }
+
+    // NUM_LOCAL só é único dentro da zona eleitoral no TRE real (erratum
+    // pós-Task 20 — 30 colisões reais confirmadas em locais genuinamente
+    // distintos). Segunda ocorrência da mesma zona+num_local nesta
+    // importação vai pra staging pra revisão manual, nunca auto-resolvida.
+    const chaveZonaNumLocal = `${preparado.zonaNumero}:${preparado.numLocal}`;
+    if (vistoZonaNumLocal.has(chaveZonaNumLocal)) {
+      totalStaging++;
+      if (!dryRun && importacaoId) {
+        await deps.inserirStaging({
+          importacaoId,
+          linhaOriginal: linhaCrua,
+          rowHash: preparado.rowHash,
+          motivos: ['num_local_duplicado_mesma_zona'],
+        });
+      }
+      continue;
+    }
+    vistoZonaNumLocal.add(chaveZonaNumLocal);
 
     const bairroOficialId = await deps.matchBairroOficial(input.municipioId, preparado.bairroNomeOriginal, limiar);
 
