@@ -2697,7 +2697,7 @@ ingerirLote(
 ```bash
 cd web && npm run tre:dry-run -- --csv scripts/tre/__fixtures__/tre-sample.csv --municipio 2211001 --ano 2026
 ```
-Esperado: `[dry-run] linhas=10 importaria=6 staging=1 erros=1` (linhas 1,4,5,6,7,10 casam bairro = 6 publicáveis; linha 3 sem match = 1 staging; linha com `numLocal` vazio não existe na fixture real — ajustar a expectativa ao rodar: **conferir a contagem real impressa e usá-la como baseline**, o importante é confirmar abaixo que nada foi persistido).
+Esperado: `[dry-run] linhas=10 importaria=9 staging=1 erros=0` (só a linha 3, bairro `ZZZNADAVER`, não casa; as outras 9 casam com `AEROPORTO` ou `CENTRO`, nenhuma tem `NUM_LOCAL`/nome ausente). Se o número impresso divergir, use-o como baseline real — o que importa é confirmar abaixo que nada foi persistido.
 
 Via `mcp__supabase__execute_sql`:
 ```sql
