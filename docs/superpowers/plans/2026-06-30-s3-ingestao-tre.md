@@ -920,7 +920,7 @@ SELECT table_name FROM information_schema.tables WHERE table_name = 'bairro_loca
 ```
 Esperado: 0 linhas.
 
-- [ ] **Step 2: Criar e aplicar migration 0034**
+- [ ] **Step 2: Criar e aplicar migration 0035**
 
 `supabase/migrations/0035_bairro_local.sql`:
 ```sql
@@ -1006,7 +1006,7 @@ git commit -m "feat(s3): bairro_local campaign overlay table with tenant RLS (00
 
 ---
 
-### Task 9: Reconciliação de bairro (migration 0035)
+### Task 9: Reconciliação de bairro (migration 0036)
 
 **Files:**
 - Create: `supabase/migrations/0036_reconciliacao_bairro.sql`
@@ -1015,7 +1015,7 @@ git commit -m "feat(s3): bairro_local campaign overlay table with tenant RLS (00
 - Consumes: `bairro_local` (Task 8), `bairro_oficial` (Task 2), `importacao_tre` (Task 3), `status_reconciliacao_enum` (Task 1)
 - Produces: tabela `bairro_reconciliacao_alerta`, funções `detectar_reconciliacao_bairro(uuid) → integer`, `resolver_reconciliacao_bairro(uuid, status_reconciliacao_enum, text) → void`
 
-- [ ] **Step 1: Criar e aplicar migration 0035**
+- [ ] **Step 1: Criar e aplicar migration 0036**
 
 `supabase/migrations/0036_reconciliacao_bairro.sql`:
 ```sql
@@ -1192,7 +1192,7 @@ git commit -m "feat(s3): bairro reconciliation alert table + detect/resolve func
 
 ---
 
-### Task 10: FK real `pessoa.secao_id` (migration 0036)
+### Task 10: FK real `pessoa.secao_id` (migration 0037)
 
 **Files:**
 - Create: `supabase/migrations/0037_pessoa_secao_fk.sql`
@@ -1208,7 +1208,7 @@ SELECT conname FROM pg_constraint WHERE conname = 'pessoa_secao_id_fkey';
 ```
 Esperado: 0 linhas.
 
-- [ ] **Step 2: Criar e aplicar migration 0036**
+- [ ] **Step 2: Criar e aplicar migration 0037**
 
 `supabase/migrations/0037_pessoa_secao_fk.sql`:
 ```sql
