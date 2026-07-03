@@ -18,6 +18,7 @@ const { MockMap, MockMarker, MockPopup } = vi.hoisted(() => {
   }
   class MockPopup {
     setHTML() { return this; }
+    setDOMContent() { return this; }
   }
   return { MockMap, MockMarker, MockPopup };
 });

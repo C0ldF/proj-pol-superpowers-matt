@@ -84,9 +84,19 @@ export function MapaCalorClient() {
       el.style.background = CORES[camada];
       el.style.opacity = valor === null ? '0.2' : '1';
 
-      const popup = new maplibregl.Popup({ offset: 12 }).setHTML(
-        `<strong>${area.area_nome}</strong><br/>Força: ${area.forca}<br/>Potencial: ${area.potencial}<br/>Penetração: ${area.penetracao ?? 'sem dado'}`,
+      const content = document.createElement('div');
+      const nome = document.createElement('strong');
+      nome.textContent = area.area_nome;
+      content.append(
+        nome,
+        document.createElement('br'),
+        `Força: ${area.forca}`,
+        document.createElement('br'),
+        `Potencial: ${area.potencial}`,
+        document.createElement('br'),
+        `Penetração: ${area.penetracao ?? 'sem dado'}`,
       );
+      const popup = new maplibregl.Popup({ offset: 12 }).setDOMContent(content);
 
       markers.push(
         new maplibregl.Marker({ element: el })
