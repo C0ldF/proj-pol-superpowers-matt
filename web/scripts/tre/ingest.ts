@@ -4,7 +4,6 @@ import type { LinhaCsvTre, LocalPreparado } from './tipos';
 export interface IngestDeps {
   upsertMunicipio(input: { codIbge: number; nome: string; uf: string }): Promise<void>;
   upsertZona(input: { municipioId: number; numero: number }): Promise<string>;
-  matchBairroOficial(municipioId: number, nomeBruto: string, limiar: number): Promise<string | null>;
   criarImportacao(input: {
     municipioId: number; uf: string; ano: number; arquivoNome: string;
     arquivoSha256: string; arquivoTamanhoBytes: number; importerVersion: string;
@@ -14,7 +13,7 @@ export interface IngestDeps {
     status?: string; totalPublicados?: number; totalStaging?: number; totalErros?: number; log?: unknown;
   }): Promise<void>;
   inserirLocalVotacao(input: {
-    importacaoId: string; zonaId: string; bairroOficialId: string; local: LocalPreparado;
+    importacaoId: string; zonaId: string; bairroOficialId: string | null; local: LocalPreparado;
   }): Promise<void>;
   inserirStaging(input: {
     importacaoId: string; linhaOriginal: LinhaCsvTre; rowHash: string; motivos: string[];
@@ -31,7 +30,6 @@ export interface IngerirLoteInput {
   arquivoSha256: string;
   arquivoTamanhoBytes: number;
   operador: string;
-  limiar?: number;
   importerVersion?: string;
   dryRun?: boolean;
 }
@@ -44,25 +42,33 @@ export interface IngerirLoteResultado {
   totalErros: number;
 }
 
-const IMPORTER_VERSION_PADRAO = 's3.0';
-const LIMIAR_PADRAO = 0.4;
+const IMPORTER_VERSION_PADRAO = 's3.1';
 
-// Fase "ingest" do pipeline (spec S3, decisões 2-3): parse + match + insere.
-// NUNCA geocodifica, NUNCA publica — essas são as fases separadas `geocode`
-// e `publicar`. Termina sempre em status='pendente_revisao'.
+// Fase "ingest" do pipeline. NUNCA geocodifica, NUNCA publica — fases
+// separadas `geocode`/`publicar`. Termina sempre em status='pendente_revisao'.
+//
+// Erratum (Tasks 23-25): (1) o CSV do TRE é estadual, não municipal — só
+// linhas cujo COD_LOCALIDADE_IBGE bate com o município pedido entram no
+// lote; as demais são descartadas silenciosamente (não contam em nenhum
+// total). (2) local_votacao NÃO depende de casar bairro contra
+// bairro_oficial — bairro_oficial_id é sempre NULL vindo do CSV; o match
+// fuzzy (match_bairro_oficial, Task 6) continua existindo só pra
+// bairro_local/reconciliação (Tasks 8-9), não pro CSV de locais de votação.
 export async function ingerirLote(
   input: IngerirLoteInput,
   deps: IngestDeps,
 ): Promise<IngerirLoteResultado> {
-  const limiar = input.limiar ?? LIMIAR_PADRAO;
   const importerVersion = input.importerVersion ?? IMPORTER_VERSION_PADRAO;
   const dryRun = input.dryRun ?? false;
+
+  const linhasDoMunicipio = input.linhas.filter(
+    (l) => l.codLocalidadeIbge === String(input.municipioId),
+  );
 
   let totalPublicados = 0;
   let totalStaging = 0;
   let totalErros = 0;
   let importacaoId: string | null = null;
-  const vistoZonaNumLocal = new Set<string>();
 
   if (!dryRun) {
     await deps.upsertMunicipio({ codIbge: input.municipioId, nome: input.municipioNome, uf: input.uf });
@@ -75,15 +81,16 @@ export async function ingerirLote(
       arquivoTamanhoBytes: input.arquivoTamanhoBytes,
       importerVersion,
       operador: input.operador,
-      totalLinhas: input.linhas.length,
+      totalLinhas: linhasDoMunicipio.length,
     });
     await deps.atualizarImportacao(importacaoId, { status: 'processando' });
   }
 
-  for (const linhaCrua of input.linhas) {
+  const vistoZonaNumLocal = new Set<string>();
+
+  for (const linhaCrua of linhasDoMunicipio) {
     const preparado = prepararLinha(linhaCrua);
 
-    // required fields ausentes/inválidos → staging, nunca chega no match de bairro
     if (preparado.numLocal <= 0 || !preparado.nome.trim()) {
       totalErros++;
       if (!dryRun && importacaoId) {
@@ -97,10 +104,6 @@ export async function ingerirLote(
       continue;
     }
 
-    // NUM_LOCAL só é único dentro da zona eleitoral no TRE real (erratum
-    // pós-Task 20 — 30 colisões reais confirmadas em locais genuinamente
-    // distintos). Segunda ocorrência da mesma zona+num_local nesta
-    // importação vai pra staging pra revisão manual, nunca auto-resolvida.
     const chaveZonaNumLocal = `${preparado.zonaNumero}:${preparado.numLocal}`;
     if (vistoZonaNumLocal.has(chaveZonaNumLocal)) {
       totalStaging++;
@@ -116,25 +119,10 @@ export async function ingerirLote(
     }
     vistoZonaNumLocal.add(chaveZonaNumLocal);
 
-    const bairroOficialId = await deps.matchBairroOficial(input.municipioId, preparado.bairroNomeOriginal, limiar);
-
-    if (!bairroOficialId) {
-      totalStaging++;
-      if (!dryRun && importacaoId) {
-        await deps.inserirStaging({
-          importacaoId,
-          linhaOriginal: linhaCrua,
-          rowHash: preparado.rowHash,
-          motivos: ['bairro_sem_match'],
-        });
-      }
-      continue;
-    }
-
     totalPublicados++;
     if (!dryRun && importacaoId) {
       const zonaId = await deps.upsertZona({ municipioId: input.municipioId, numero: preparado.zonaNumero });
-      await deps.inserirLocalVotacao({ importacaoId, zonaId, bairroOficialId, local: preparado });
+      await deps.inserirLocalVotacao({ importacaoId, zonaId, bairroOficialId: null, local: preparado });
     }
   }
 
@@ -152,5 +140,5 @@ export async function ingerirLote(
     });
   }
 
-  return { importacaoId, totalLinhas: input.linhas.length, totalPublicados, totalStaging, totalErros };
+  return { importacaoId, totalLinhas: linhasDoMunicipio.length, totalPublicados, totalStaging, totalErros };
 }

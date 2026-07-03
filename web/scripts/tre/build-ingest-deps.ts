@@ -34,16 +34,6 @@ export function buildIngestDeps(): IngestDeps {
       return data.id as string;
     },
 
-    async matchBairroOficial(municipioId, nomeBruto, limiar) {
-      const { data, error } = await admin.rpc('match_bairro_oficial', {
-        p_municipio_id: municipioId,
-        p_nome_bruto: nomeBruto,
-        p_limiar: limiar,
-      });
-      if (error) throw error;
-      return (data as string | null) ?? null;
-    },
-
     async criarImportacao(input) {
       const { data, error } = await admin
         .from('importacao_tre')
