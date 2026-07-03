@@ -40,8 +40,8 @@ rotas de API e as páginas de auth.
    `GRANT`ada pra `authenticated` — só junta as duas e calcula Penetração.
    Mesmo padrão de composição de funções `SECURITY DEFINER` pequenas já usado
    no S2. Retorna `{area_id, area_nome, forca, potencial, penetracao,
-   geojson}` por linha, ordenado por `area_nome` (saída determinística) — o
-   frontend troca de camada (Força/Potencial/Penetração) sem novo fetch.
+   ponto_geojson}` por linha, ordenado por `area_nome` (saída determinística)
+   — o frontend troca de camada (Força/Potencial/Penetração) sem novo fetch.
 5. **Potencial** = soma de `secao.aptos` de locais com `elegivel_calor=true`
    (regra 1 do ADR 0011, herdada do S3), agrupado pela granularidade.
 6. **Força** = contagem de `pessoa` com `secao_id` preenchido na mesma área
@@ -127,28 +127,31 @@ CREATE OR REPLACE FUNCTION public.potencial_por_area(
   area_id text,
   area_nome text,
   potencial integer,
-  geojson jsonb
+  ponto_geojson jsonb
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
 AS $$
   SELECT
     CASE WHEN p_granularidade = 'zona' THEN lv.zona_id::text
          ELSE public.normalizar_texto(lv.bairro_nome_original) END AS area_id,
-    CASE WHEN p_granularidade = 'zona' THEN ze.numero::text
-         ELSE lv.bairro_nome_original END AS area_nome,
+    CASE WHEN p_granularidade = 'zona' THEN min(ze.numero)::text
+         ELSE initcap(min(lv.bairro_nome_original)) END AS area_nome,
     sum(s.aptos)::integer AS potencial,
-    -- ST_PointOnSurface(ST_ConvexHull(...)) em vez de ST_Centroid puro: um
-    -- bairro com locais espalhados/em duas regiões pode ter centroide fora
-    -- da área (num rio, num vazio) — PointOnSurface garante um ponto
-    -- dentro do casco convexo dos locais reais.
+    -- ST_GeometricMedian, não ST_Centroid nem ST_PointOnSurface(ST_ConvexHull):
+    -- centroide puro pode cair fora da área real (rio, vazio) se os locais
+    -- estiverem espalhados/em duas regiões; o casco convexo resolve isso mas
+    -- pode "inflar" a área e ainda assim pousar longe de qualquer local real
+    -- (ex.: 3 locais formando um triângulo grande). Mediana geométrica
+    -- minimiza a distância total até os locais reais — tende a cair dentro
+    -- de um agrupamento de verdade, robusta a outlier isolado.
     extensions.ST_AsGeoJSON(
-      extensions.ST_PointOnSurface(extensions.ST_ConvexHull(extensions.ST_Collect(lv.geo)))
-    )::jsonb AS geojson
+      extensions.ST_GeometricMedian(extensions.ST_Collect(lv.geo))
+    )::jsonb AS ponto_geojson
   FROM public.local_votacao lv
   JOIN public.secao s ON s.local_id = lv.id
   JOIN public.zona_eleitoral ze ON ze.id = lv.zona_id
   WHERE lv.elegivel_calor = true
-  GROUP BY 1, 2;
+  GROUP BY 1;
 $$;
 REVOKE ALL ON FUNCTION public.potencial_por_area(public.granularidade_calor_enum) FROM public, authenticated, anon;
 ```
@@ -159,6 +162,15 @@ o TRE mudar a grafia de um bairro num ano seguinte ("Vila Operária" →
 "Vila Operaria"), o `area_id` muda junto. Não afeta esta fatia (sem
 cache/URL/favorito dependendo de `area_id` hoje), mas é uma limitação a
 lembrar se algo depender desse id no futuro (analytics, links diretos).
+
+**`area_nome` de bairro é estabilizado com `initcap(min(...))`.** O
+agrupamento por `area_id` (via `normalizar_texto`) já junta "Centro" e
+"CENTRO" corretamente numa linha só — mas sem tratamento, o texto exibido
+seria o que a agregação escolhesse arbitrariamente (podendo variar entre
+execuções conforme o plano de query). `min()` escolhe uma variante de forma
+determinística; `initcap()` uniformiza a capitalização por cima disso, então
+o resultado é sempre "Centro", nunca "CENTRO", independente de qual
+variante o `min()` pegou.
 
 ### `forca_por_area(p_granularidade, p_actor_uid)` — interna
 
@@ -229,11 +241,16 @@ CREATE OR REPLACE FUNCTION public.mapa_calor_agregado(
   forca integer,
   potencial integer,
   penetracao numeric,
-  geojson jsonb
+  ponto_geojson jsonb
 )
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
 AS $$
 BEGIN
+  -- Só GRANT'ada pra authenticated (que sempre carrega um JWT válido), então
+  -- auth.uid() NULL não deveria acontecer na prática — mas retorna vazio em
+  -- vez de assumir, mesmo padrão de defesa do "sem campanha_id" abaixo.
+  IF auth.uid() IS NULL THEN RETURN; END IF;
+
   RETURN QUERY
   SELECT
     pa.area_id, pa.area_nome,
@@ -242,7 +259,7 @@ BEGIN
     CASE WHEN pa.potencial > 0
          THEN round(coalesce(fa.forca, 0)::numeric / pa.potencial, 4)
          ELSE NULL END,
-    pa.geojson
+    pa.ponto_geojson
   FROM public.potencial_por_area(granularidade) pa
   LEFT JOIN public.forca_por_area(granularidade, auth.uid()) fa ON fa.area_id = pa.area_id
   ORDER BY pa.area_nome;
@@ -256,6 +273,20 @@ GRANT EXECUTE ON FUNCTION public.mapa_calor_agregado(public.granularidade_calor_
 11. `round(..., 4)` fixa a precisão da Penetração (evita divergência de
 representação entre Postgres/JSON/JS). `ORDER BY area_nome` torna a saída
 determinística — sem isso o frontend recebe ordem arbitrária a cada request.
+
+**Penetração normalmente cai em `[0, 1]`, mas isso não é garantido pelo
+schema** — é a expectativa (Força é, na prática, um subconjunto do
+Potencial), não um contrato. Nada impede um valor `> 1` com dado anômalo ou
+de teste (ex.: staff da campanha cadastrado com `secao_id` de uma área onde
+o TRE registra menos aptos que o esperado). O frontend não deve tratar
+`penetracao > 1` como erro.
+
+**Duas passagens completas da tabela (`potencial_por_area` e
+`forca_por_area` cada uma faz seu próprio scan/agrupamento, unidas depois
+por `LEFT JOIN`) em vez de uma única query combinada.** Escolha deliberada
+de legibilidade sobre performance — na escala MVP (334 linhas reais) o custo
+é irrelevante; combinar os dois em uma CTE só economizaria um scan às custas
+de uma função bem maior e menos testável isoladamente.
 
 ### Índices
 
@@ -295,9 +326,30 @@ aqui de qualquer forma).
 3. Valida `granularidade` ∈ {zona, bairro} (default: zona)
 4. supabase.rpc('mapa_calor_agregado', { granularidade })
    — sem actor_uid: auth.uid() resolve sozinho a partir da sessão do ssrClient
-5. Retorna array de { area_id, area_nome, forca, potencial, penetracao, geojson }
-   — geojson já pronto (function retorna jsonb), rota não toca PostGIS
+5. Retorna array de { area_id, area_nome, forca, potencial, penetracao, ponto_geojson }
+   — ponto_geojson já pronto (function retorna jsonb), rota não toca PostGIS
 ```
+
+**Contrato da resposta** (um elemento do array por área):
+
+```json
+{
+  "area_id": "3b7f...-zona-uuid",
+  "area_nome": "12",
+  "forca": 125,
+  "potencial": 3200,
+  "penetracao": 0.0391,
+  "ponto_geojson": {
+    "type": "Point",
+    "coordinates": [-42.8034, -5.0892]
+  }
+}
+```
+
+`ponto_geojson` é sempre um `Point` — nunca um `Polygon`/`MultiPolygon` (daí
+o nome `ponto_`, não `geojson` genérico: é a mediana geométrica dos locais
+da área, um marcador, não o contorno da área). `penetracao` pode ser `null`
+(área sem potencial) — ver seção anterior.
 
 ### Página `/mapa-calor`
 
@@ -332,7 +384,8 @@ toggle bairro/zona (novo fetch ao trocar), popup ao clicar num ponto com os
    (`mapa_calor_agregado` executável por `authenticated`, mesma categoria já
    aceita da `importacao_esta_publicada`)
 9. **Área sem geometria:** todos os locais de uma área com `geo IS NULL`
-   (nenhum geocodificado ainda) → `geojson IS NULL` pra essa área, sem erro
+   (nenhum geocodificado ainda) → `ponto_geojson IS NULL` pra essa área, sem
+   erro
 10. **Campanha sem nenhuma pessoa:** `forca_por_area` retorna vazio;
     `mapa_calor_agregado` ainda retorna as áreas (via `potencial_por_area`)
     com `forca=0` — confirma que o `LEFT JOIN` não faz a área inteira sumir
@@ -352,8 +405,8 @@ toggle bairro/zona (novo fetch ao trocar), popup ao clicar num ponto com os
 
 ### Camada Next.js
 
-9. **401 sem sessão:** `GET /api/mapa-calor` sem cookie de sessão
-10. **200 com dados reais:** sessão de gestor de uma campanha com dado real
+15. **401 sem sessão:** `GET /api/mapa-calor` sem cookie de sessão
+16. **200 com dados reais:** sessão de gestor de uma campanha com dado real
     (Teresina, após geocode+publish manual) retorna array não-vazio
-11. **Página redireciona sem sessão:** acessar `/mapa-calor` deslogado vai
+17. **Página redireciona sem sessão:** acessar `/mapa-calor` deslogado vai
     pro login
