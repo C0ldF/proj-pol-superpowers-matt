@@ -13,12 +13,11 @@ const { values } = parseArgs({
     uf: { type: 'string', default: 'PI' },
     ano: { type: 'string' },
     operador: { type: 'string', default: process.env.USER ?? process.env.USERNAME ?? 'desconhecido' },
-    limiar: { type: 'string' },
   },
 });
 
 if (!values.csv || !values.municipio || !values.ano) {
-  console.error('uso: tre:ingest --csv <path> --municipio <cod_ibge> --ano <ano> [--limiar 0.4]');
+  console.error('uso: tre:ingest --csv <path> --municipio <cod_ibge> --ano <ano>');
   process.exit(1);
 }
 
@@ -38,7 +37,6 @@ ingerirLote(
     arquivoSha256,
     arquivoTamanhoBytes,
     operador: values.operador!,
-    limiar: values.limiar ? Number(values.limiar) : undefined,
   },
   buildIngestDeps(),
 )

@@ -11,7 +11,6 @@ const { values } = parseArgs({
     'municipio-nome': { type: 'string', default: 'TERESINA' },
     uf: { type: 'string', default: 'PI' },
     ano: { type: 'string' },
-    limiar: { type: 'string' },
   },
 });
 
@@ -33,7 +32,6 @@ ingerirLote(
     arquivoSha256: '',
     arquivoTamanhoBytes: 0,
     operador: 'dry-run',
-    limiar: values.limiar ? Number(values.limiar) : undefined,
     dryRun: true,
   },
   buildIngestDeps(),
