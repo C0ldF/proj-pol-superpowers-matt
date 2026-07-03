@@ -28,7 +28,9 @@ BEGIN
     pa.ponto_geojson
   FROM public.potencial_por_area(granularidade) pa
   LEFT JOIN public.forca_por_area(granularidade, auth.uid()) fa ON fa.area_id = pa.area_id
-  ORDER BY pa.area_nome;
+  -- zona: area_nome é número de zona como texto (ordena numericamente via lpad);
+  -- bairro: area_nome é nome alfabético (ordena como texto normal).
+  ORDER BY CASE WHEN granularidade = 'zona' THEN lpad(pa.area_nome, 10, '0') ELSE pa.area_nome END;
 END;
 $$;
 REVOKE ALL ON FUNCTION public.mapa_calor_agregado(public.granularidade_calor_enum) FROM public, anon;
