@@ -26,22 +26,22 @@ function makeDeps(overrides: Partial<RevisarDeps> = {}): RevisarDeps {
 }
 
 describe('promoverStaging', () => {
-  it('insere local_votacao com o bairro escolhido e marca revisado', async () => {
+  it('insere local_votacao com bairro_oficial_id nulo e marca revisado', async () => {
     const deps = makeDeps();
-    const r = await promoverStaging('staging-1', 'bairro-escolhido', 'gestor-x', deps);
+    const r = await promoverStaging('staging-1', 'gestor-x', deps);
 
     expect(r.promovido).toBe(true);
     expect(deps.inserirLocalVotacao).toHaveBeenCalledWith(expect.objectContaining({
-      importacaoId: 'importacao-1', zonaId: 'zona-1', bairroOficialId: 'bairro-escolhido',
+      importacaoId: 'importacao-1', zonaId: 'zona-1', bairroOficialId: null,
     }));
     expect(deps.marcarRevisado).toHaveBeenCalledWith({
-      id: 'staging-1', resolvidoBairroOficialId: 'bairro-escolhido', revisadoPor: 'gestor-x',
+      id: 'staging-1', resolvidoBairroOficialId: null, revisadoPor: 'gestor-x',
     });
   });
 
   it('lança se o staging não existe', async () => {
     const deps = makeDeps({ buscarStaging: vi.fn(async () => null) });
-    await expect(promoverStaging('inexistente', 'bairro-x', 'gestor-x', deps)).rejects.toThrow('staging não encontrado');
+    await expect(promoverStaging('inexistente', 'gestor-x', deps)).rejects.toThrow('staging não encontrado');
   });
 });
 

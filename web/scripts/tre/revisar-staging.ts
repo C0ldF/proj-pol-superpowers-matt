@@ -18,7 +18,7 @@ export interface RevisarDeps {
   } | null>;
   upsertZona(input: { municipioId: number; numero: number }): Promise<string>;
   inserirLocalVotacao(input: {
-    importacaoId: string; zonaId: string; bairroOficialId: string; local: LocalPreparado;
+    importacaoId: string; zonaId: string; bairroOficialId: string | null; local: LocalPreparado;
   }): Promise<void>;
   marcarRevisado(input: {
     id: string; resolvidoBairroOficialId: string | null; revisadoPor: string;
@@ -33,11 +33,12 @@ export async function listarStagingPendente(
 }
 
 // Promove: reprocessa a linha crua salva em staging com a mesma lógica pura
-// do ingest (prepararLinha) e insere em local_votacao com o bairro_oficial_id
-// que o Superadmin escolheu manualmente.
+// do ingest (prepararLinha) e insere em local_votacao. Os motivos de staging
+// restantes (erro_parse, num_local_duplicado_mesma_zona) não dependem de um
+// Superadmin escolher um bairro — bairro_oficial_id é sempre NULL, igual ao
+// fluxo de ingest normal (ver ingerirLote em ingest.ts).
 export async function promoverStaging(
   id: string,
-  bairroOficialId: string,
   revisadoPor: string,
   deps: RevisarDeps,
 ): Promise<{ promovido: true }> {
@@ -48,9 +49,9 @@ export async function promoverStaging(
   const zonaId = await deps.upsertZona({ municipioId: registro.municipioId, numero: preparado.zonaNumero });
 
   await deps.inserirLocalVotacao({
-    importacaoId: registro.importacaoId, zonaId, bairroOficialId, local: preparado,
+    importacaoId: registro.importacaoId, zonaId, bairroOficialId: null, local: preparado,
   });
-  await deps.marcarRevisado({ id, resolvidoBairroOficialId: bairroOficialId, revisadoPor });
+  await deps.marcarRevisado({ id, resolvidoBairroOficialId: null, revisadoPor });
 
   return { promovido: true };
 }

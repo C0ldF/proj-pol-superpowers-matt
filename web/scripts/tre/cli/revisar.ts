@@ -6,7 +6,6 @@ const { values } = parseArgs({
   options: {
     importacao: { type: 'string' },
     id: { type: 'string' },
-    'bairro-oficial-id': { type: 'string' },
     descartar: { type: 'boolean', default: false },
     operador: { type: 'string', default: process.env.USER ?? process.env.USERNAME ?? 'desconhecido' },
   },
@@ -15,14 +14,14 @@ const { values } = parseArgs({
 const deps = buildRevisarDeps();
 
 async function main() {
-  if (values.id && values['bairro-oficial-id']) {
-    const r = await promoverStaging(values.id, values['bairro-oficial-id']!, values.operador!, deps);
-    console.log(`staging ${values.id} promovido: ${r.promovido}`);
-    return;
-  }
   if (values.id && values.descartar) {
     await descartarStaging(values.id, values.operador!, deps);
     console.log(`staging ${values.id} descartado`);
+    return;
+  }
+  if (values.id) {
+    const r = await promoverStaging(values.id, values.operador!, deps);
+    console.log(`staging ${values.id} promovido: ${r.promovido}`);
     return;
   }
 
