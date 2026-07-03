@@ -34,9 +34,13 @@ rotas de API e as páginas de auth.
    normalizado evita reabrir essa decisão; variações de grafia do mesmo
    bairro no CSV viram grupos separados — aceito como limitação conhecida do
    MVP, não bloqueia a fatia.
-4. **Uma função só calcula os 3 números por área numa passada.**
-   `mapa_calor_agregado(actor_uid, granularidade)` retorna
-   `{area_id, area_nome, forca, potencial, penetracao, geo}` por linha — o
+4. **Três funções, uma pública.** `potencial_por_area` e `forca_por_area`
+   calculam cada métrica isoladamente (testáveis sozinhas via `execute_sql`,
+   reusáveis por dashboards futuros); `mapa_calor_agregado` — a única
+   `GRANT`ada pra `authenticated` — só junta as duas e calcula Penetração.
+   Mesmo padrão de composição de funções `SECURITY DEFINER` pequenas já usado
+   no S2. Retorna `{area_id, area_nome, forca, potencial, penetracao,
+   geojson}` por linha, ordenado por `area_nome` (saída determinística) — o
    frontend troca de camada (Força/Potencial/Penetração) sem novo fetch.
 5. **Potencial** = soma de `secao.aptos` de locais com `elegivel_calor=true`
    (regra 1 do ADR 0011, herdada do S3), agrupado pela granularidade.
@@ -63,7 +67,21 @@ rotas de API e as páginas de auth.
     função em si bypassa RLS internamente (pra poder ler `pessoa` fora da
     sub-árvore quando o papel permite), mas quem a invoca precisa ser
     `authenticated`.
-11. **Pré-requisito operacional, fora do escopo desta fatia:** o lote real de
+11. **A função pública lê `auth.uid()` internamente, não recebe identidade
+    como parâmetro.** Diferença importante da `importacao_esta_publicada`: lá
+    não há personalização por usuário (só um fato público — lote publicado
+    ou não), então receber um id como parâmetro não abre brecha. Aqui a
+    visibilidade de Força É personalizada por quem chama — se
+    `mapa_calor_agregado` recebesse `actor_uid` como argumento, qualquer
+    cliente autenticado poderia chamar a RPC diretamente (PostgREST expõe
+    toda função `GRANT`ada pra `authenticated` em `/rest/v1/rpc/...`, não só
+    via a rota Next.js) passando o `uuid` de outra pessoa e ler a Força de
+    outra campanha. Só a função pública lê `auth.uid()`; as duas funções
+    internas (`potencial_por_area`/`forca_por_area`) continuam `REVOKE`d de
+    `authenticated` — nunca chamáveis direto — e por isso podem manter
+    `actor_uid` como parâmetro explícito sem risco, o que as deixa testáveis
+    por impersonation via `execute_sql` como as funções do S2.
+12. **Pré-requisito operacional, fora do escopo desta fatia:** o lote real de
     Teresina (S3) está em `pendente_revisao`, sem `tre:geocode` nem
     `tre:publicar` rodados — o mapa fica sem pontos até o Superadmin rodar
     essas duas fases (scripts já existem, prontos, do S3). Não é trabalho do
@@ -89,89 +107,173 @@ rotas de API e as páginas de auth.
 
 ## Schema / Funções
 
-Nenhuma tabela nova. Uma função:
+Nenhuma tabela nova. Um enum + três funções.
 
-### `mapa_calor_agregado(actor_uid uuid, granularidade text)`
+### Enum `granularidade_calor_enum`
+
+Substitui `text` + validação manual — inválido vira erro de cast do próprio
+Postgres, sem `IF`/`RAISE` no corpo das funções:
+
+```sql
+CREATE TYPE public.granularidade_calor_enum AS ENUM ('zona', 'bairro');
+```
+
+### `potencial_por_area(p_granularidade)` — interna
+
+```sql
+CREATE OR REPLACE FUNCTION public.potencial_por_area(
+  p_granularidade public.granularidade_calor_enum
+) RETURNS TABLE (
+  area_id text,
+  area_nome text,
+  potencial integer,
+  geojson jsonb
+)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+  SELECT
+    CASE WHEN p_granularidade = 'zona' THEN lv.zona_id::text
+         ELSE public.normalizar_texto(lv.bairro_nome_original) END AS area_id,
+    CASE WHEN p_granularidade = 'zona' THEN ze.numero::text
+         ELSE lv.bairro_nome_original END AS area_nome,
+    sum(s.aptos)::integer AS potencial,
+    -- ST_PointOnSurface(ST_ConvexHull(...)) em vez de ST_Centroid puro: um
+    -- bairro com locais espalhados/em duas regiões pode ter centroide fora
+    -- da área (num rio, num vazio) — PointOnSurface garante um ponto
+    -- dentro do casco convexo dos locais reais.
+    extensions.ST_AsGeoJSON(
+      extensions.ST_PointOnSurface(extensions.ST_ConvexHull(extensions.ST_Collect(lv.geo)))
+    )::jsonb AS geojson
+  FROM public.local_votacao lv
+  JOIN public.secao s ON s.local_id = lv.id
+  JOIN public.zona_eleitoral ze ON ze.id = lv.zona_id
+  WHERE lv.elegivel_calor = true
+  GROUP BY 1, 2;
+$$;
+REVOKE ALL ON FUNCTION public.potencial_por_area(public.granularidade_calor_enum) FROM public, authenticated, anon;
+```
+
+**`area_id` de bairro não é estável entre importações.** É
+`normalizar_texto(bairro_nome_original)` — texto cru do CSV, não uma FK. Se
+o TRE mudar a grafia de um bairro num ano seguinte ("Vila Operária" →
+"Vila Operaria"), o `area_id` muda junto. Não afeta esta fatia (sem
+cache/URL/favorito dependendo de `area_id` hoje), mas é uma limitação a
+lembrar se algo depender desse id no futuro (analytics, links diretos).
+
+### `forca_por_area(p_granularidade, p_actor_uid)` — interna
+
+```sql
+CREATE OR REPLACE FUNCTION public.forca_por_area(
+  p_granularidade public.granularidade_calor_enum,
+  p_actor_uid uuid
+) RETURNS TABLE (
+  area_id text,
+  forca integer
+)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+DECLARE
+  v_campanha_id uuid;
+  v_papel public.papel_login;
+BEGIN
+  SELECT campanha_id, papel INTO v_campanha_id, v_papel
+    FROM public.usuario_campanha WHERE user_id = p_actor_uid;
+  IF v_campanha_id IS NULL THEN RETURN; END IF;
+
+  RETURN QUERY
+  SELECT
+    CASE WHEN p_granularidade = 'zona' THEN lv.zona_id::text
+         ELSE public.normalizar_texto(lv.bairro_nome_original) END AS area_id,
+    count(p.id)::integer AS forca
+  FROM public.pessoa p
+  JOIN public.secao s ON s.id = p.secao_id
+  JOIN public.local_votacao lv ON lv.id = s.local_id
+  WHERE p.campanha_id = v_campanha_id
+    AND p.deleted_at IS NULL
+    AND (
+      v_papel IN ('gestor', 'coordenador')
+      OR public.pessoa_em_subarvore_do_actor(p_actor_uid, p.id)
+    )
+  GROUP BY 1;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.forca_por_area(public.granularidade_calor_enum, uuid) FROM public, authenticated, anon;
+```
+
+`REVOKE ... FROM authenticated` nas duas funções internas não impede
+`mapa_calor_agregado` (abaixo) de chamá-las: `SECURITY DEFINER` eleva o
+papel efetivo pra durante a execução, e chamadas aninhadas dentro dessa
+execução são checadas contra esse papel elevado, não contra quem originou a
+requisição — mesmo padrão já usado no S2 (funções `SECURITY DEFINER`
+chamando outras). Só a função pública abaixo precisa estar acessível de
+fora.
+
+**Nota de performance:** `pessoa_em_subarvore_do_actor` roda uma vez por
+`pessoa` candidata dentro do agregado (não uma vez só) — aceitável na escala
+MVP (mesmo teto do S2, <10k nós), mesmo trade-off já documentado lá. Se um
+dia migrar pra closure table, troca só o corpo desta função — a assinatura
+pública (`mapa_calor_agregado`) não muda.
+
+**Potencial nunca filtra por sub-árvore** — `potencial_por_area` não recebe
+identidade nem toca `pessoa`; é dado oficial (S3), igual pra qualquer papel
+que possa ver o mapa.
+
+### `mapa_calor_agregado(granularidade)` — pública, a única exposta
 
 ```sql
 CREATE OR REPLACE FUNCTION public.mapa_calor_agregado(
-  actor_uid uuid,
-  granularidade text
+  granularidade public.granularidade_calor_enum
 ) RETURNS TABLE (
   area_id text,
   area_nome text,
   forca integer,
   potencial integer,
   penetracao numeric,
-  geo extensions.geometry
+  geojson jsonb
 )
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
 AS $$
-DECLARE
-  actor_campanha_id uuid;
-  actor_papel public.papel_login;
 BEGIN
-  SELECT campanha_id, papel INTO actor_campanha_id, actor_papel
-    FROM public.usuario_campanha WHERE user_id = actor_uid;
-  IF actor_campanha_id IS NULL THEN RETURN; END IF;
-  IF granularidade NOT IN ('zona', 'bairro') THEN
-    RAISE EXCEPTION 'granularidade inválida: %', granularidade;
-  END IF;
-
   RETURN QUERY
-  WITH potencial_area AS (
-    SELECT
-      CASE WHEN granularidade = 'zona' THEN lv.zona_id::text
-           ELSE public.normalizar_texto(lv.bairro_nome_original) END AS area_id,
-      CASE WHEN granularidade = 'zona' THEN ze.numero::text
-           ELSE lv.bairro_nome_original END AS area_nome,
-      sum(s.aptos) AS potencial,
-      extensions.ST_Centroid(extensions.ST_Collect(lv.geo)) AS geo
-    FROM public.local_votacao lv
-    JOIN public.secao s ON s.local_id = lv.id
-    JOIN public.zona_eleitoral ze ON ze.id = lv.zona_id
-    WHERE lv.elegivel_calor = true
-    GROUP BY 1, 2
-  ),
-  forca_area AS (
-    SELECT
-      CASE WHEN granularidade = 'zona' THEN lv.zona_id::text
-           ELSE public.normalizar_texto(lv.bairro_nome_original) END AS area_id,
-      count(p.id) AS forca
-    FROM public.pessoa p
-    JOIN public.secao s ON s.id = p.secao_id
-    JOIN public.local_votacao lv ON lv.id = s.local_id
-    WHERE p.campanha_id = actor_campanha_id
-      AND p.deleted_at IS NULL
-      AND (
-        actor_papel IN ('gestor', 'coordenador')
-        OR public.pessoa_em_subarvore_do_actor(actor_uid, p.id)
-      )
-    GROUP BY 1
-  )
   SELECT
     pa.area_id, pa.area_nome,
-    coalesce(fa.forca, 0)::integer,
-    pa.potencial::integer,
-    CASE WHEN pa.potencial > 0 THEN coalesce(fa.forca, 0)::numeric / pa.potencial ELSE NULL END,
-    pa.geo
-  FROM potencial_area pa
-  LEFT JOIN forca_area fa ON fa.area_id = pa.area_id;
+    coalesce(fa.forca, 0),
+    pa.potencial,
+    CASE WHEN pa.potencial > 0
+         THEN round(coalesce(fa.forca, 0)::numeric / pa.potencial, 4)
+         ELSE NULL END,
+    pa.geojson
+  FROM public.potencial_por_area(granularidade) pa
+  LEFT JOIN public.forca_por_area(granularidade, auth.uid()) fa ON fa.area_id = pa.area_id
+  ORDER BY pa.area_nome;
 END;
 $$;
-REVOKE ALL ON FUNCTION public.mapa_calor_agregado(uuid, text) FROM public, anon;
-GRANT EXECUTE ON FUNCTION public.mapa_calor_agregado(uuid, text) TO authenticated;
+REVOKE ALL ON FUNCTION public.mapa_calor_agregado(public.granularidade_calor_enum) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.mapa_calor_agregado(public.granularidade_calor_enum) TO authenticated;
 ```
 
-**Nota de performance:** `pessoa_em_subarvore_do_actor` roda uma vez por
-`pessoa` candidata dentro do agregado (não uma vez só) — aceitável na escala
-MVP (mesmo teto do S2, <10k nós), mesmo trade-off já documentado lá; upgrade
-pra closure table beneficia os dois lugares ao mesmo tempo se um dia for
-preciso.
+`auth.uid()` (não um parâmetro) identifica quem está chamando — ver decisão
+11. `round(..., 4)` fixa a precisão da Penetração (evita divergência de
+representação entre Postgres/JSON/JS). `ORDER BY area_nome` torna a saída
+determinística — sem isso o frontend recebe ordem arbitrária a cada request.
 
-**Potencial nunca filtra por sub-árvore** — `potencial_area` não depende de
-`actor_uid` nem de `pessoa`; é dado oficial (S3), igual pra qualquer papel
-que possa ver o mapa.
+### Índices
+
+Já cobertos desde o S3, reaproveitados sem mudança: `secao_local_idx` (join
+`secao→local_votacao`), PK de `secao`/`local_votacao` (joins via id).
+Genuinamente novo pra este padrão de query: nenhum índice tem `zona_id` como
+coluna líder de `local_votacao` hoje (só aparece como 2ª coluna da unique
+`(importacao_id, zona_id, num_local)`, inútil pra `GROUP BY zona_id`
+isolado) — adicionar:
+
+```sql
+CREATE INDEX local_votacao_zona_idx ON public.local_votacao (zona_id);
+```
+
+Deferido, não necessário nesta escala (334 linhas reais, Teresina): índice
+parcial em `elegivel_calor` e composto em `pessoa(campanha_id, secao_id)` —
+seriam otimização prematura num MVP deste tamanho; revisitar se/quando o
+volume de dados justificar.
 
 ## RLS / Segurança
 
@@ -191,9 +293,10 @@ aqui de qualquer forma).
 1. ssrClient(cookieStore) — sessão do usuário logado
 2. Se não autenticado → 401
 3. Valida `granularidade` ∈ {zona, bairro} (default: zona)
-4. supabase.rpc('mapa_calor_agregado', { actor_uid: user.id, granularidade })
-5. Retorna array de { area_id, area_nome, forca, potencial, penetracao, geo }
-   (geo como GeoJSON via cast ST_AsGeoJSON no retorno, ou no client)
+4. supabase.rpc('mapa_calor_agregado', { granularidade })
+   — sem actor_uid: auth.uid() resolve sozinho a partir da sessão do ssrClient
+5. Retorna array de { area_id, area_nome, forca, potencial, penetracao, geojson }
+   — geojson já pronto (function retorna jsonb), rota não toca PostGIS
 ```
 
 ### Página `/mapa-calor`
@@ -218,14 +321,34 @@ toggle bairro/zona (novo fetch ao trocar), popup ao clicar num ponto com os
    cenário de teste do S2: Liderança A não vê sub-árvore de Liderança B —
    aqui, não CONTA na soma)
 5. **Penetração NULL:** área com potencial=0 retorna `penetracao IS NULL`,
-   não erro nem zero
+   não erro nem zero; **Penetração arredondada:** resultado tem no máximo 4
+   casas decimais
 6. **Granularidade zona vs bairro:** mesma pessoa/local aparece agrupado
    diferente conforme o parâmetro; `area_nome` bate (número da zona vs texto
    do bairro)
-7. **`granularidade` inválida:** função lança exceção clara
+7. **`granularidade` inválida:** cast pro enum falha com erro claro do
+   Postgres (não precisa de `RAISE` manual — o tipo já garante isso)
 8. **`get_advisors(security)`:** sem alerta novo além do WARN esperado
    (`mapa_calor_agregado` executável por `authenticated`, mesma categoria já
    aceita da `importacao_esta_publicada`)
+9. **Área sem geometria:** todos os locais de uma área com `geo IS NULL`
+   (nenhum geocodificado ainda) → `geojson IS NULL` pra essa área, sem erro
+10. **Campanha sem nenhuma pessoa:** `forca_por_area` retorna vazio;
+    `mapa_calor_agregado` ainda retorna as áreas (via `potencial_por_area`)
+    com `forca=0` — confirma que o `LEFT JOIN` não faz a área inteira sumir
+11. **Campanha/lote sem locais elegíveis:** `potencial_por_area` vazio →
+    função retorna 0 linhas (não erro)
+12. **Isolamento entre campanhas:** duas campanhas com pessoas apontando pra
+    seções dos mesmos locais (dado do TRE é global, não por campanha) — Força
+    de uma nunca aparece na agregação da outra
+13. **Usuário sem `usuario_campanha`:** chama a função autenticado mas sem
+    vínculo de login algum → retorna vazio, não erro (mesmo branch de
+    `v_campanha_id IS NULL`)
+14. **Spoofing bloqueado:** não é possível verificar via SQL puro que a RPC
+    pública ignora um `actor_uid` externo (ela não recebe esse parâmetro mais
+    — a prova é estrutural: a assinatura de `mapa_calor_agregado` não tem
+    esse argumento). Confirmar isso lendo a assinatura da função aplicada,
+    não com um teste de comportamento.
 
 ### Camada Next.js
 
