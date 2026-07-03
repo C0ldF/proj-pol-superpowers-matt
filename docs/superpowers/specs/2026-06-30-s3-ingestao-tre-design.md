@@ -680,3 +680,34 @@ desta fatia:
   (ex.: dados abertos do TSE de resultado por seção/local) e uma ADR própria
   antes de qualquer schema — recomendo tratar como pergunta em aberto pro
   usuário decidir se entra no roadmap, e não assumir automaticamente.
+
+## Erratum (pós-execução, Tasks 21-27 do plano)
+
+Duas correções descobertas só ao rodar o CSV real (3555 linhas, 224
+municípios do Piauí), não a fixture de 10 linhas:
+
+1. **`local_votacao_unico` faltava `zona_id`** (decisão 8 original estava
+   incompleta) — `NUM_LOCAL` do TRE só é único dentro da zona, não no
+   município. Corrigido (migration 0038); colisões reais mesmo-zona (1176 na
+   base real) viram staging com `motivos:['num_local_duplicado_mesma_zona']`
+   em vez de travar a constraint.
+2. **O CSV é estadual, não municipal, e o match de bairro contra
+   `bairro_oficial` nunca deveria ter sido exigido pro CSV de locais de
+   votação.** Decisão original (seção "Regras de negócio obrigatórias" do
+   pedido do usuário, e ADR 0011) previa fuzzy match de bairro pro CSV — o
+   usuário esclareceu depois, ao ver o pipeline vazar dado de Parnaíba pra
+   dentro de Teresina via match de nome de bairro genérico ("Centro"), que
+   isso nunca foi a intenção: o CSV serve só pra alimentar
+   `local_votacao`/`secao` (mapa de calor), sem depender de casar bairro.
+   `bairro_oficial_id` em `local_votacao` virou opcional (migration 0039,
+   sempre `NULL` vindo do CSV); `match_bairro_oficial` continua existindo,
+   mas só serve à criação de `bairro_local` e à reconciliação (ADR 0017,
+   Tasks 8-9) — um recurso separado do CSV de locais de votação. Adicionado
+   também: filtro obrigatório por `COD_LOCALIDADE_IBGE` == município pedido
+   (linhas de outras cidades são descartadas, nunca inseridas).
+
+Lição para as próximas fatias: uma alegação de "concluído" baseada só em os
+totais internos baterem entre si (`total_linhas = publicados+staging+erros`)
+não é suficiente — vale checar se a *magnitude* faz sentido pro domínio (334
+linhas de um município real vs. 3555 do arquivo bruto era o sinal que
+faltava checar da primeira vez).

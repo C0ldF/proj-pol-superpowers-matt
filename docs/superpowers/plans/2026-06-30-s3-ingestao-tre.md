@@ -4160,3 +4160,526 @@ git commit -m "docs(s3): TRE pipeline README + real ingest of Teresina 2026 (pen
 
 Mesma nota da Task 20 original: S3 completo, dado real de Teresina 2026 ingerido e aguardando revisão do Superadmin. Acrescentar: erratum pós-lançamento corrigido (constraint `zona_id` + dedupe mesma-zona pra staging), descoberto só ao rodar dado real — reforça pra próximas fatias sempre incluir pelo menos um teste de integração com uma amostra maior/mais realista do dado real, não só a fixture mínima de 10 linhas.
 
+---
+
+## Erratum 2 pós-Task 23: CSV é estadual (224 municípios), pipeline não filtrava — e usuário decidiu remover o match de bairro do CSV
+
+Rodando a Task 23 pela segunda vez (um subagent diferente, em paralelo ao que
+o controller já tinha fechado), foi descoberto que **o CSV real cobre 224
+municípios do Piauí inteiro, não só Teresina** (334 das 3555 linhas são de
+Teresina; o resto é de outras 223 cidades). Nem `parseCsvTre` nem
+`ingerirLote` filtravam linha por município — toda linha do arquivo era
+processada como se fosse do município pedido no `--municipio`. Isso causou
+contaminação real e confirmada: um local de Parnaíba (`CIRCULO OPERARIO DE
+PARNAIBA`) foi inserido em `local_votacao` marcado como `municipio_id=2211001`
+(Teresina), casado via fuzzy match contra o bairro genérico "Centro" só
+porque o nome do bairro colide entre cidades. O lote contaminado
+(`8dc95857-...`) foi apagado antes de qualquer publicação.
+
+Ao apresentar o achado pro usuário, ele esclareceu um mal-entendido maior na
+concepção original do S3: **o CSV não deveria depender de casar bairro
+nenhum contra o JSON de bairros oficiais.** O CSV é só pra alimentar
+`local_votacao` (nome, endereço, lat/long, seções) pro mapa de calor — o
+match fuzzy contra `bairro_oficial` (ADR 0011/0019, que motivou todo o design
+original de `match_bairro_oficial` + staging por `bairro_sem_match`) não era
+o que ele queria pra essa fatia. `bairro_oficial` e `match_bairro_oficial`
+continuam existindo — servem a `bairro_local`/reconciliação (ADR 0017, Tasks
+8-9), que é um recurso separado, não a ingestão do CSV de locais de votação.
+
+Duas correções, portanto: (1) filtro de município — necessário de qualquer
+forma, independente da decisão de bairro; sem ele, sem match de bairro, TODAS
+as 3555 linhas de 224 cidades diferentes entrariam em `local_votacao` como se
+fossem de Teresina; (2) remoção da exigência de match de bairro em
+`local_votacao` — `bairro_oficial_id` vira opcional (sempre `NULL` vindo do
+CSV), motivo de staging `bairro_sem_match` deixa de existir.
+
+### Task 24: `local_votacao.bairro_oficial_id` vira opcional (migration 0039)
+
+**Files:**
+- Create: `supabase/migrations/0039_local_votacao_bairro_opcional.sql`
+
+**Interfaces:**
+- Consumes: `local_votacao` (Task 4)
+- Produces: `bairro_oficial_id` nullable (era `NOT NULL`); FK/coluna continuam existindo pra uso futuro, só não são mais exigidas na ingestão do CSV
+
+- [ ] **Step 1: Verificar que a coluna é `NOT NULL` hoje**
+
+```sql
+SELECT is_nullable FROM information_schema.columns
+ WHERE table_name = 'local_votacao' AND column_name = 'bairro_oficial_id';
+```
+Esperado: `NO`.
+
+- [ ] **Step 2: Criar e aplicar migration 0039**
+
+`supabase/migrations/0039_local_votacao_bairro_opcional.sql`:
+```sql
+-- Erratum descoberto na Task 23/24: o CSV do TRE não deve depender de casar
+-- bairro contra o JSON oficial (ADR 0011 original previa isso, mas o usuário
+-- esclareceu que essa fatia é só pra alimentar o mapa de calor com
+-- nome/endereco/lat-long/secoes — o match fuzzy fica só pra bairro_local
+-- (ADR 0017, Tasks 8-9), não pro CSV). bairro_oficial_id vira opcional.
+ALTER TABLE public.local_votacao ALTER COLUMN bairro_oficial_id DROP NOT NULL;
+```
+
+Aplicar via `mcp__supabase__apply_migration` (`name: "local_votacao_bairro_opcional"`).
+
+- [ ] **Step 3: Verificar que a coluna aceita `NULL`**
+
+```sql
+SELECT is_nullable FROM information_schema.columns
+ WHERE table_name = 'local_votacao' AND column_name = 'bairro_oficial_id';
+```
+Esperado: `YES`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add supabase/migrations/0039_local_votacao_bairro_opcional.sql
+git commit -m "fix(s3): local_votacao.bairro_oficial_id becomes optional — CSV ingest no longer requires a bairro match (0039)"
+```
+
+---
+
+### Task 25: `ingest.ts` — filtro de município + remover exigência de bairro
+
+**Files:**
+- Modify: `web/scripts/tre/ingest.ts`
+- Modify: `web/scripts/tre/ingest.test.ts`
+- Modify: `web/scripts/tre/build-ingest-deps.ts`
+
+**Interfaces:**
+- Consumes: `local_votacao.bairro_oficial_id` opcional (Task 24)
+- Produces: `ingerirLote` agora (1) processa só as linhas cujo `codLocalidadeIbge` bate com `input.municipioId` (linhas de outros municípios são descartadas silenciosamente, não contam em `totalLinhas`/staging/erros), e (2) nunca chama `matchBairroOficial` nem manda linha pra staging por bairro sem match — todo local com `num_local`/`nome` válidos e sem duplicata de `zona+num_local` vira `local_votacao` direto, com `bairro_oficial_id = NULL`
+
+- [ ] **Step 1: Atualizar os testes existentes que dependiam de `matchBairroOficial`/`bairro_sem_match`**
+
+Em `web/scripts/tre/ingest.test.ts`: remover `matchBairroOficial` de `makeDeps()` (não faz mais parte de `IngestDeps`); remover/reescrever os testes "linha com bairro casado vira local_votacao publicado" e "linha sem match de bairro vira staging" (o segundo não existe mais — não há mais `bairro_sem_match`); atualizar "limiar customizado é repassado" (não existe mais `limiar`/RPC de match, remover esse teste). Reescrever com os casos abaixo (substituindo os antigos 8 testes por estes 7):
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { ingerirLote, type IngestDeps } from './ingest';
+import type { LinhaCsvTre } from './tipos';
+
+function linha(overrides: Partial<LinhaCsvTre> = {}): LinhaCsvTre {
+  return {
+    uf: 'PI', localidade: 'TERESINA', codLocalidadeIbge: '2211001', zona: '1',
+    tipoLocalVotacao: 'CONVENCIONAL', situacaoLocalVotacao: 'ATIVO', numLocal: '1',
+    dataCriacao: '2014-01-01', localVotacao: 'ESCOLA TESTE', telefone: '',
+    endereco: 'RUA TESTE, 1', bairro: 'AEROPORTO', cep: '64000000',
+    latitude: '-5.0', longitude: '-42.8', secoes: '(s: 1, apt: 100)',
+    qtdAptos: '100', qtdCancelados: '0', qtdSuspensos: '0',
+    qtdVagasReservadas: '0', qtdBaseHistorica: '0',
+    ...overrides,
+  };
+}
+
+function makeDeps(overrides: Partial<IngestDeps> = {}): IngestDeps {
+  return {
+    upsertMunicipio: vi.fn(async () => {}),
+    upsertZona: vi.fn(async () => 'zona-id'),
+    criarImportacao: vi.fn(async () => 'importacao-id'),
+    atualizarImportacao: vi.fn(async () => {}),
+    inserirLocalVotacao: vi.fn(async () => {}),
+    inserirStaging: vi.fn(async () => {}),
+    ...overrides,
+  };
+}
+
+const baseInput = {
+  municipioId: 2211001, municipioNome: 'TERESINA', uf: 'PI', ano: 2026,
+  arquivoNome: 'x.csv', arquivoSha256: 'hash', arquivoTamanhoBytes: 10, operador: 'teste',
+};
+
+describe('ingerirLote', () => {
+  it('linha válida do município pedido vira local_votacao publicado, bairro_oficial_id=null, sem chamar match', async () => {
+    const deps = makeDeps();
+    const r = await ingerirLote({ ...baseInput, linhas: [linha()] }, deps);
+
+    expect(r.totalPublicados).toBe(1);
+    expect(r.totalStaging).toBe(0);
+    expect(deps.inserirLocalVotacao).toHaveBeenCalledWith(
+      expect.objectContaining({ bairroOficialId: null }),
+    );
+    expect(deps.inserirStaging).not.toHaveBeenCalled();
+  });
+
+  it('linha de outro município é descartada silenciosamente — não conta em totalLinhas nem em nenhum bucket', async () => {
+    const deps = makeDeps();
+    const linhaTeresina = linha({ codLocalidadeIbge: '2211001' });
+    const linhaOutraCidade = linha({ codLocalidadeIbge: '2207702', localVotacao: 'ESCOLA PARNAIBA' });
+    const r = await ingerirLote({ ...baseInput, linhas: [linhaTeresina, linhaOutraCidade] }, deps);
+
+    expect(r.totalLinhas).toBe(1);
+    expect(r.totalPublicados).toBe(1);
+    expect(deps.inserirLocalVotacao).toHaveBeenCalledTimes(1);
+    expect(deps.inserirLocalVotacao).toHaveBeenCalledWith(
+      expect.objectContaining({ local: expect.objectContaining({ nome: 'ESCOLA TESTE' }) }),
+    );
+  });
+
+  it('linha sem NUM_LOCAL vira staging com erro_parse', async () => {
+    const deps = makeDeps();
+    const r = await ingerirLote({ ...baseInput, linhas: [linha({ numLocal: '' })] }, deps);
+
+    expect(r.totalErros).toBe(1);
+    expect(deps.inserirStaging).toHaveBeenCalledWith(expect.objectContaining({ motivos: ['erro_parse'] }));
+  });
+
+  it('segunda linha com mesma zona+num_local vira staging com num_local_duplicado_mesma_zona', async () => {
+    const deps = makeDeps();
+    const linhaA = linha({ numLocal: '5', zona: '2' });
+    const linhaB = linha({ numLocal: '5', zona: '2', localVotacao: 'OUTRO LOCAL' });
+    const r = await ingerirLote({ ...baseInput, linhas: [linhaA, linhaB] }, deps);
+
+    expect(r.totalPublicados).toBe(1);
+    expect(r.totalStaging).toBe(1);
+    expect(deps.inserirStaging).toHaveBeenCalledWith(
+      expect.objectContaining({ motivos: ['num_local_duplicado_mesma_zona'] }),
+    );
+  });
+
+  it('mesma num_local em zonas diferentes NÃO é tratada como duplicata', async () => {
+    const deps = makeDeps();
+    const linhaA = linha({ numLocal: '7', zona: '1' });
+    const linhaB = linha({ numLocal: '7', zona: '2' });
+    const r = await ingerirLote({ ...baseInput, linhas: [linhaA, linhaB] }, deps);
+
+    expect(r.totalPublicados).toBe(2);
+    expect(r.totalStaging).toBe(0);
+  });
+
+  it('dry-run nunca escreve', async () => {
+    const deps = makeDeps();
+    const r = await ingerirLote({ ...baseInput, linhas: [linha()], dryRun: true }, deps);
+
+    expect(r.totalPublicados).toBe(1);
+    expect(r.importacaoId).toBeNull();
+    expect(deps.criarImportacao).not.toHaveBeenCalled();
+    expect(deps.upsertMunicipio).not.toHaveBeenCalled();
+    expect(deps.inserirLocalVotacao).not.toHaveBeenCalled();
+    expect(deps.inserirStaging).not.toHaveBeenCalled();
+    expect(deps.atualizarImportacao).not.toHaveBeenCalled();
+  });
+
+  it('lote termina em pendente_revisao, nunca publicado sozinho', async () => {
+    const deps = makeDeps();
+    await ingerirLote({ ...baseInput, linhas: [linha()] }, deps);
+    const chamada = (deps.atualizarImportacao as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[1].status && c[1].status !== 'processando',
+    );
+    expect(chamada?.[1].status).toBe('pendente_revisao');
+  });
+});
+```
+
+- [ ] **Step 2: Rodar teste — verificar FALHA**
+
+```bash
+cd web && npx vitest run scripts/tre/ingest.test.ts
+```
+Esperado: falha (interface `IngestDeps` ainda tem `matchBairroOficial`, código ainda chama a RPC e ainda gera `bairro_sem_match`).
+
+- [ ] **Step 3: Reescrever `ingerirLote` em `ingest.ts`**
+
+`web/scripts/tre/ingest.ts` (arquivo inteiro substituído):
+```typescript
+import { prepararLinha } from './preparar-linha';
+import type { LinhaCsvTre, LocalPreparado } from './tipos';
+
+export interface IngestDeps {
+  upsertMunicipio(input: { codIbge: number; nome: string; uf: string }): Promise<void>;
+  upsertZona(input: { municipioId: number; numero: number }): Promise<string>;
+  criarImportacao(input: {
+    municipioId: number; uf: string; ano: number; arquivoNome: string;
+    arquivoSha256: string; arquivoTamanhoBytes: number; importerVersion: string;
+    operador: string; totalLinhas: number;
+  }): Promise<string>;
+  atualizarImportacao(id: string, patch: {
+    status?: string; totalPublicados?: number; totalStaging?: number; totalErros?: number; log?: unknown;
+  }): Promise<void>;
+  inserirLocalVotacao(input: {
+    importacaoId: string; zonaId: string; bairroOficialId: string | null; local: LocalPreparado;
+  }): Promise<void>;
+  inserirStaging(input: {
+    importacaoId: string; linhaOriginal: LinhaCsvTre; rowHash: string; motivos: string[];
+  }): Promise<void>;
+}
+
+export interface IngerirLoteInput {
+  linhas: LinhaCsvTre[];
+  municipioId: number;
+  municipioNome: string;
+  uf: string;
+  ano: number;
+  arquivoNome: string;
+  arquivoSha256: string;
+  arquivoTamanhoBytes: number;
+  operador: string;
+  importerVersion?: string;
+  dryRun?: boolean;
+}
+
+export interface IngerirLoteResultado {
+  importacaoId: string | null;
+  totalLinhas: number;
+  totalPublicados: number;
+  totalStaging: number;
+  totalErros: number;
+}
+
+const IMPORTER_VERSION_PADRAO = 's3.1';
+
+// Fase "ingest" do pipeline. NUNCA geocodifica, NUNCA publica — fases
+// separadas `geocode`/`publicar`. Termina sempre em status='pendente_revisao'.
+//
+// Erratum (Tasks 23-25): (1) o CSV do TRE é estadual, não municipal — só
+// linhas cujo COD_LOCALIDADE_IBGE bate com o município pedido entram no
+// lote; as demais são descartadas silenciosamente (não contam em nenhum
+// total). (2) local_votacao NÃO depende de casar bairro contra
+// bairro_oficial — bairro_oficial_id é sempre NULL vindo do CSV; o match
+// fuzzy (match_bairro_oficial, Task 6) continua existindo só pra
+// bairro_local/reconciliação (Tasks 8-9), não pro CSV de locais de votação.
+export async function ingerirLote(
+  input: IngerirLoteInput,
+  deps: IngestDeps,
+): Promise<IngerirLoteResultado> {
+  const importerVersion = input.importerVersion ?? IMPORTER_VERSION_PADRAO;
+  const dryRun = input.dryRun ?? false;
+
+  const linhasDoMunicipio = input.linhas.filter(
+    (l) => l.codLocalidadeIbge === String(input.municipioId),
+  );
+
+  let totalPublicados = 0;
+  let totalStaging = 0;
+  let totalErros = 0;
+  let importacaoId: string | null = null;
+
+  if (!dryRun) {
+    await deps.upsertMunicipio({ codIbge: input.municipioId, nome: input.municipioNome, uf: input.uf });
+    importacaoId = await deps.criarImportacao({
+      municipioId: input.municipioId,
+      uf: input.uf,
+      ano: input.ano,
+      arquivoNome: input.arquivoNome,
+      arquivoSha256: input.arquivoSha256,
+      arquivoTamanhoBytes: input.arquivoTamanhoBytes,
+      importerVersion,
+      operador: input.operador,
+      totalLinhas: linhasDoMunicipio.length,
+    });
+    await deps.atualizarImportacao(importacaoId, { status: 'processando' });
+  }
+
+  const vistoZonaNumLocal = new Set<string>();
+
+  for (const linhaCrua of linhasDoMunicipio) {
+    const preparado = prepararLinha(linhaCrua);
+
+    if (preparado.numLocal <= 0 || !preparado.nome.trim()) {
+      totalErros++;
+      if (!dryRun && importacaoId) {
+        await deps.inserirStaging({
+          importacaoId,
+          linhaOriginal: linhaCrua,
+          rowHash: preparado.rowHash,
+          motivos: ['erro_parse'],
+        });
+      }
+      continue;
+    }
+
+    const chaveZonaNumLocal = `${preparado.zonaNumero}:${preparado.numLocal}`;
+    if (vistoZonaNumLocal.has(chaveZonaNumLocal)) {
+      totalStaging++;
+      if (!dryRun && importacaoId) {
+        await deps.inserirStaging({
+          importacaoId,
+          linhaOriginal: linhaCrua,
+          rowHash: preparado.rowHash,
+          motivos: ['num_local_duplicado_mesma_zona'],
+        });
+      }
+      continue;
+    }
+    vistoZonaNumLocal.add(chaveZonaNumLocal);
+
+    totalPublicados++;
+    if (!dryRun && importacaoId) {
+      const zonaId = await deps.upsertZona({ municipioId: input.municipioId, numero: preparado.zonaNumero });
+      await deps.inserirLocalVotacao({ importacaoId, zonaId, bairroOficialId: null, local: preparado });
+    }
+  }
+
+  if (!dryRun && importacaoId) {
+    await deps.atualizarImportacao(importacaoId, {
+      status: 'pendente_revisao',
+      totalPublicados,
+      totalStaging,
+      totalErros,
+      log: {
+        warnings: [], errors: [], duration_ms: 0,
+        geocode_calls: 0, geocode_failures: 0,
+        staging: totalStaging, imported: totalPublicados,
+      },
+    });
+  }
+
+  return { importacaoId, totalLinhas: linhasDoMunicipio.length, totalPublicados, totalStaging, totalErros };
+}
+```
+
+- [ ] **Step 4: Rodar teste — verificar PASSA**
+
+```bash
+cd web && npx vitest run scripts/tre/ingest.test.ts
+```
+Esperado: 7/7 passam.
+
+- [ ] **Step 5: Atualizar `build-ingest-deps.ts`**
+
+Remover o método `matchBairroOficial` do objeto retornado (não faz mais
+parte de `IngestDeps`); em `inserirLocalVotacao`, o campo `bairro_oficial_id`
+do INSERT passa a usar `bairroOficialId` diretamente (que agora sempre chega
+`null` do orquestrador) em vez de assumir um valor obrigatório.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add web/scripts/tre/ingest.ts web/scripts/tre/ingest.test.ts web/scripts/tre/build-ingest-deps.ts
+git commit -m "fix(s3): ingest no longer requires bairro match; filters rows by município (CSV is statewide, not city-scoped)"
+```
+
+---
+
+### Task 26: `revisar-staging.ts` — remover dependência de bairro na promoção
+
+**Files:**
+- Modify: `web/scripts/tre/revisar-staging.ts`
+- Modify: `web/scripts/tre/revisar-staging.test.ts`
+- Modify: `web/scripts/tre/build-revisar-deps.ts`
+- Modify: `web/scripts/tre/cli/revisar.ts`
+
+**Interfaces:**
+- Consumes: `inserirLocalVotacao` com `bairroOficialId: string | null` (Task 25)
+- Produces: `promoverStaging(id, revisadoPor, deps)` — perde o parâmetro `bairroOficialId` (nenhum motivo de staging restante — `erro_parse`, `num_local_duplicado_mesma_zona` — precisa de escolha de bairro pra ser promovido)
+
+- [ ] **Step 1: Atualizar `revisar-staging.ts`**
+
+Remover o parâmetro `bairroOficialId` de `promoverStaging`; a chamada a
+`deps.inserirLocalVotacao` passa `bairroOficialId: null`; a chamada a
+`deps.marcarRevisado` passa `resolvidoBairroOficialId: null` sempre (o campo
+na tabela `local_votacao_staging` continua existindo, só nunca mais é
+preenchido por este fluxo).
+
+- [ ] **Step 2: Atualizar `revisar-staging.test.ts`**
+
+Ajustar as chamadas de `promoverStaging('staging-1', 'gestor-x', deps)` (sem
+o segundo argumento de bairro) e as asserções de `inserirLocalVotacao`/
+`marcarRevisado` pra `bairroOficialId: null`/`resolvidoBairroOficialId: null`.
+
+- [ ] **Step 3: Rodar teste — verificar PASSA**
+
+```bash
+cd web && npx vitest run scripts/tre/revisar-staging.test.ts
+```
+Esperado: todos passam (mesmos 4 casos, assinatura ajustada).
+
+- [ ] **Step 4: Atualizar `build-revisar-deps.ts` e `cli/revisar.ts`**
+
+`build-revisar-deps.ts`: `inserirLocalVotacao` passa a aceitar
+`bairroOficialId: string | null` no INSERT (mesma mudança da Task 25).
+`cli/revisar.ts`: remover a flag `--bairro-oficial-id` — promover passa a
+ser só `tre:revisar -- --id <staging_id>` (sem escolha de bairro).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/scripts/tre/revisar-staging.ts web/scripts/tre/revisar-staging.test.ts web/scripts/tre/build-revisar-deps.ts web/scripts/tre/cli/revisar.ts
+git commit -m "fix(s3): tre:revisar no longer needs a bairro choice to promote a staging row"
+```
+
+---
+
+### Task 27: Rerodar a ingestão real (de novo) + corrigir README/commit/memória
+
+**Files:**
+- Modify: `web/scripts/tre/README.md`
+
+**Interfaces:**
+- Consumes: filtro de município + bairro opcional (Tasks 24-26)
+
+- [ ] **Step 1: Confirmar `importacao_tre` limpo para município 2211001 + ano 2026**
+
+```sql
+SELECT count(*) FROM public.importacao_tre WHERE municipio_id = 2211001 AND ano = 2026;
+```
+Esperado: `0` (o lote contaminado já foi apagado no incidente da Task 23).
+
+- [ ] **Step 2: Rodar `tre:dry-run` de novo**
+
+```bash
+cd web && npx tsx --env-file=.env.local scripts/tre/cli/dry-run.ts --csv "D:\projeto-pol-superpowers\4a-ad1b-420e-9d99-aa785ee2386b.csv" --municipio 2211001 --ano 2026
+```
+Esperado: `linhas` agora bate só com as linhas de Teresina (334, não 3555)
+— confirma que o filtro de município está funcionando antes mesmo de gravar
+qualquer coisa.
+
+- [ ] **Step 3: Rodar `tre:ingest` real**
+
+```bash
+cd web && npx tsx --env-file=.env.local scripts/tre/cli/ingest.ts --csv "D:\projeto-pol-superpowers\4a-ad1b-420e-9d99-aa785ee2386b.csv" --municipio 2211001 --ano 2026 --operador "$(whoami)"
+```
+Esperado: `linhas≈334 publicados=<N> staging=<M> erros=<E>` com `N+M+E≈334`
+— bem menor e mais rápido que a tentativa anterior (334 linhas, não 3555;
+sem chamada de RPC de bairro por linha).
+
+- [ ] **Step 4: Verificar via `execute_sql`**
+
+```sql
+SELECT status, total_linhas, total_publicados, total_staging, total_erros FROM public.importacao_tre
+ WHERE municipio_id = 2211001 AND ano = 2026;
+-- esperado: status='pendente_revisao'; total_linhas≈334; soma bate
+
+SELECT count(*) FROM public.local_votacao
+ WHERE importacao_id = (SELECT id FROM public.importacao_tre WHERE municipio_id=2211001 AND ano=2026)
+   AND bairro_oficial_id IS NOT NULL;
+-- esperado: 0 (nenhum local do CSV tem bairro_oficial_id preenchido — confirma que o match não roda mais)
+
+-- confirmar que NENHUM local de outro município vazou (spot-check por endereço/nome que não é de Teresina)
+SELECT count(*) FROM public.local_votacao
+ WHERE importacao_id = (SELECT id FROM public.importacao_tre WHERE municipio_id=2211001 AND ano=2026)
+   AND (nome ILIKE '%PARNAIBA%' OR endereco ILIKE '%PARNAIBA%');
+-- esperado: 0
+```
+
+- [ ] **Step 5: `get_advisors(security)` final**
+
+Via MCP. Esperado: mesmo estado de sempre, sem alerta novo.
+
+- [ ] **Step 6: Corrigir README e commitar**
+
+Atualizar `web/scripts/tre/README.md`: remover qualquer menção a
+"casamento de bairro" como requisito do CSV de locais de votação (deixar
+claro que `bairro_oficial`/match fuzzy servem só a `bairro_local`); atualizar
+os números reais (334 linhas de Teresina, não 3555 nem os números
+contaminados da tentativa anterior); remover a flag `--bairro-oficial-id`
+do exemplo de `tre:revisar`.
+
+```bash
+git add web/scripts/tre/README.md
+git commit -m "docs(s3): correct README — CSV is statewide (filtered to município), local_votacao doesn't require bairro match"
+```
+
+- [ ] **Step 7: Corrigir a memória do projeto**
+
+Substituir a nota anterior (que declarava sucesso sobre o lote contaminado
+`8dc95857-...`, já apagado) por: S3 completo de verdade, com os dois
+erratums (zona_id/dedupe E filtro de município/bairro opcional) documentados
+e corrigidos; lote real final (novo ID da Task 27) com contagem correta de
+~334 linhas de Teresina; reforçar a lição de que uma alegação de "concluído"
+baseada só em "os números batem entre si" não é suficiente — vale checar se
+a *magnitude* dos números faz sentido pro domínio (334 de um município real
+vs. 3555 do arquivo bruto era a pista que faltou verificar da primeira vez).
+
