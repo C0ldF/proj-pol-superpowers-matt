@@ -41,7 +41,10 @@ export function MapaCalorClient() {
         if (!cancelado) setAreas(data);
       })
       .catch(() => {
-        if (!cancelado) setErro('Não foi possível carregar os dados do mapa.');
+        if (!cancelado) {
+          setErro('Não foi possível carregar os dados do mapa.');
+          setAreas([]);
+        }
       });
     return () => {
       cancelado = true;
@@ -67,6 +70,10 @@ export function MapaCalorClient() {
       center: [-42.8034, -5.0892],
       zoom: 11,
     });
+    return () => {
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
