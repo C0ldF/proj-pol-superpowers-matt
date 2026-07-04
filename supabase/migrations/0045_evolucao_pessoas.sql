@@ -20,6 +20,12 @@ BEGIN
          AND (p.deleted_at IS NULL OR p.deleted_at::date > d.dia)
          AND (
            v_papel IN ('gestor', 'coordenador')
+           -- Nota de performance: pessoa_em_subarvore_do_actor roda uma
+           -- recursão própria por pessoa candidata, por dia (90 dias x N
+           -- candidatos) — mesmo trade-off já aceito em forca_por_area (S4,
+           -- migration 0042_forca_por_area.sql). Aceitável na escala MVP;
+           -- candidato natural de otimização se a campanha crescer para
+           -- dezenas de milhares de pessoas — fora de escopo aqui.
            OR public.pessoa_em_subarvore_do_actor(auth.uid(), p.id)
          )
     ) AS total
