@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { NavShell } from '../components/NavShell';
 
 type Granularidade = 'zona' | 'bairro';
 type Camada = 'forca' | 'potencial' | 'penetracao';
@@ -118,29 +119,31 @@ export function MapaCalorClient() {
   }, [areas, camada]);
 
   return (
-    <div>
+    <NavShell>
       <div>
-        <label>
-          Granularidade:
-          <select
-            value={granularidade}
-            onChange={(e) => setGranularidade(e.target.value as Granularidade)}
-          >
-            <option value="zona">Zona</option>
-            <option value="bairro">Bairro</option>
-          </select>
-        </label>
-        <label>
-          Camada:
-          <select value={camada} onChange={(e) => setCamada(e.target.value as Camada)}>
-            <option value="forca">Força</option>
-            <option value="potencial">Potencial</option>
-            <option value="penetracao">Penetração</option>
-          </select>
-        </label>
+        <div>
+          <label>
+            Granularidade:
+            <select
+              value={granularidade}
+              onChange={(e) => setGranularidade(e.target.value as Granularidade)}
+            >
+              <option value="zona">Zona</option>
+              <option value="bairro">Bairro</option>
+            </select>
+          </label>
+          <label>
+            Camada:
+            <select value={camada} onChange={(e) => setCamada(e.target.value as Camada)}>
+              <option value="forca">Força</option>
+              <option value="potencial">Potencial</option>
+              <option value="penetracao">Penetração</option>
+            </select>
+          </label>
+        </div>
+        {erro && <p role="alert">{erro}</p>}
+        <div ref={mapContainerRef} style={{ width: '100%', height: '600px' }} />
       </div>
-      {erro && <p role="alert">{erro}</p>}
-      <div ref={mapContainerRef} style={{ width: '100%', height: '600px' }} />
-    </div>
+    </NavShell>
   );
 }
