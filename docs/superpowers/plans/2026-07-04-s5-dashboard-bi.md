@@ -30,7 +30,7 @@
 Tabelas/funções usadas por este plano, já existentes desde S2/S3/S4 — conferidas
 direto nas migrations antes de escrever este plano:
 
-- `public.vinculo(id uuid, campanha_id uuid NOT NULL, pessoa_id uuid NOT NULL, responsavel_id uuid NULL, papel public.papel_vinculo NOT NULL, criado_em timestamptz NOT NULL)`
+- `public.vinculo(id uuid, campanha_id uuid NOT NULL, pessoa_id uuid NOT NULL, responsavel_id uuid NULL, papel public.papel_vinculo NOT NULL, criado_em timestamptz NOT NULL)` — **`responsavel_id` é `REFERENCES pessoa(id)`** (confirmado em `supabase/migrations/0017_vinculo.sql` linha 5), não o `id` de outro `vinculo`. Toda recursão deste plano (`ranking_liderancas`, `dashboard_alertas_lideranca`) compara `responsavel_id` direto contra `pessoa.id`/`vinculo.pessoa_id` com base nisso.
 - `public.pessoa(id uuid, campanha_id uuid NOT NULL, nome text NOT NULL, criado_em timestamptz NOT NULL, deleted_at timestamptz NULL)`
 - `public.usuario_campanha(user_id uuid PRIMARY KEY REFERENCES auth.users(id), campanha_id uuid NOT NULL, papel public.papel_login NOT NULL, pessoa_id uuid NULL)` — `papel_login` = `'gestor' | 'coordenador' | 'lideranca' | 'colaborador'`
 - `public.subarvore_count(p_vinculo_id uuid) RETURNS integer` — já existe desde o S2 (`0016_funcoes_autoridade.sql`); dado o `vinculo_id`, resolve `pessoa_id`/`campanha_id` daquele vínculo e retorna a contagem recursiva de descendentes (não conta a própria pessoa).
@@ -99,7 +99,11 @@ BEGIN
   ),
   sub AS (
     -- União recursiva de todos os descendentes de todos os ramos, dedupada
-    -- por UNION (não UNION ALL) — base pro total_real.
+    -- por UNION (não UNION ALL) — base pro total_real. responsavel_id É
+    -- pessoa_id (FK real: vinculo.responsavel_id uuid REFERENCES
+    -- pessoa(id), supabase/migrations/0017_vinculo.sql linha 5) — não é o
+    -- id de um outro vínculo, então o JOIN v2.responsavel_id = rr.pessoa_id
+    -- compara a mesma entidade dos dois lados.
     SELECT v2.pessoa_id FROM public.vinculo v2
       JOIN ramos_raw rr ON v2.responsavel_id = rr.pessoa_id
      WHERE v2.campanha_id = v_campanha_id
@@ -430,7 +434,15 @@ CREATE OR REPLACE FUNCTION public.dashboard_alertas_area()
 RETURNS TABLE (alvo_id text, label text, detalhe jsonb)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
 AS $$
-  WITH areas AS (
+  -- LANGUAGE sql não tem DECLARE — o limiar nomeado vira uma CTE de 1 linha
+  -- em vez de constante plpgsql (mesmo espírito de v_dias_tenure_minimo /
+  -- v_dias_janela_estagnacao em dashboard_alertas_lideranca: nomeado, não
+  -- mágico solto no WHERE). Continua hardcoded por YAGNI (decisão 6 do
+  -- spec, sem motor de regra configurável nesta fatia) — só a leitura muda.
+  WITH parametros AS (
+    SELECT 0.05::numeric AS limiar_penetracao
+  ),
+  areas AS (
     SELECT * FROM public.mapa_calor_agregado('zona')
   ),
   media AS (
@@ -442,10 +454,8 @@ AS $$
       'penetracao', a.penetracao,
       'media_potencial', round(m.media_potencial, 2)
     )
-  FROM areas a, media m
-  -- limiar de penetração = 0.05 (5%) — decisão 6 do spec, hardcoded por
-  -- YAGNI (sem motor de regra configurável nesta fatia).
-  WHERE a.potencial > m.media_potencial AND a.penetracao < 0.05;
+  FROM areas a, media m, parametros p
+  WHERE a.potencial > m.media_potencial AND a.penetracao < p.limiar_penetracao;
 $$;
 REVOKE ALL ON FUNCTION public.dashboard_alertas_area() FROM public, authenticated, anon;
 
