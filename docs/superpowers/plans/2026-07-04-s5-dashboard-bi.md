@@ -4,7 +4,7 @@
 
 **Goal:** Ship o dashboard BI determinístico — ranking de lideranças por sub-árvore, evolução temporal de pessoas, e alertas por regra fixa (sem LLM) — na segunda tela autenticada do sistema.
 
-**Architecture:** Três funções `SECURITY DEFINER` no Postgres (`ranking_liderancas`, `evolucao_pessoas`, `dashboard_alertas`, todas lendo `auth.uid()` internamente, mesmo padrão anti-spoofing do `mapa_calor_agregado` do S4) → três rotas `GET /api/dashboard/*` (Next.js, sessão via `ssrClient`) → página `/dashboard` (server component com checagem de sessão + client components: `RankingTable`, `EvolucaoChart` com Recharts, `AlertasList`) → `NavShell` compartilhado entre `/mapa-calor` e `/dashboard`.
+**Architecture:** Três funções `SECURITY DEFINER` no Postgres (`ranking_liderancas`, `evolucao_pessoas` públicas + `dashboard_alertas` composta de 2 internas — mesmo padrão de composição do `mapa_calor_agregado` do S4) → três rotas `GET /api/dashboard/*` (Next.js, via helper `authenticatedRpc` compartilhado) → página `/dashboard` (server component com checagem de sessão + client components: `RankingTable`, `EvolucaoChart` com Recharts, `AlertasList`) → `NavShell` compartilhado entre `/mapa-calor` e `/dashboard`.
 
 **Tech Stack:** Next.js 16.2.9 (App Router), React 19, TypeScript, Supabase (Postgres 17), `recharts` (novo nesta fatia), Vitest + `jsdom`/`@testing-library/react` (já existentes desde o S4), `execute_sql`/`apply_migration` via MCP Supabase.
 
@@ -12,12 +12,14 @@
 
 - **ANTES DE TOCAR CÓDIGO EM `web/`:** ler `web/node_modules/next/dist/docs/` (Next.js 16.2.9 tem breaking changes — regra do `web/AGENTS.md`).
 - Spec de referência: `docs/superpowers/specs/2026-07-04-s5-dashboard-bi-design.md` — toda task abaixo implementa uma seção dela.
-- Projeto Supabase: `axcftjqdjvknrpqzrxls`. Migrations via `mcp__supabase__apply_migration` — uma por task; cópia idêntica salva em `supabase/migrations/`. Migration mais recente é `0043`; esta fatia usa `0044`-`0046`.
-- Toda função `SECURITY DEFINER` desta fatia: `search_path = ''`, identificadores fully-qualified (`public.tabela`), sem parâmetro de identidade — lê `auth.uid()` internamente (mesmo padrão do `mapa_calor_agregado`, S4). `REVOKE ALL FROM public, anon` + `GRANT EXECUTE TO authenticated` nas 3.
-- Testes de função SQL (Tasks 1-3) seguem o padrão S2/S3/S4: verificação via `execute_sql` direto no projeto live, fixtures próprios criados e limpos dentro da própria task — **não** viram arquivo `.test.ts`. Fixtures que envolvem `auth.uid()` exigem usuários reais em `auth.users` (via Admin SDK, `SUPABASE_SECRET_KEY`) **e** simular a sessão via `execute_sql` com `SET LOCAL request.jwt.claims = '{"sub":"<user_id>"}'` antes de chamar a função (mesma técnica de impersonation já usada no S2).
-- Testes de código Next.js (Tasks 4-11) rodam com `cd web && npx vitest run <caminho>`.
+- Projeto Supabase: `axcftjqdjvknrpqzrxls`. Migrations via `mcp__supabase__apply_migration` — uma por task; cópia idêntica salva em `supabase/migrations/`. Migration mais recente é `0043`; esta fatia usa `0044`-`0047`.
+- Toda função `SECURITY DEFINER` desta fatia: `search_path = ''`, identificadores fully-qualified (`public.tabela`). Convenção de identidade (mesma do S2/S4): função **pública** (`GRANT`ada a `authenticated`) nunca recebe identidade como parâmetro — lê `auth.uid()` internamente (prova estrutural anti-spoofing). Função **interna** (`REVOKE`d de `authenticated`) recebe `p_actor_uid` como parâmetro explícito sempre que não depender, por sua vez, de outra função que já exige `auth.uid()` de sessão — isso a deixa testável por impersonation direta via `execute_sql`, sem precisar simular sessão.
+- Recursão sobre `vinculo` (usada em `ranking_liderancas` e `dashboard_alertas_lideranca`) é seguramente livre de ciclo: `trg_vinculo_ciclo_check` (S2, migration `0017_vinculo.sql`) bloqueia no `INSERT` qualquer vínculo que criaria um ciclo — a mesma garantia da qual `subarvore_count` e `pessoa_em_subarvore_do_actor` (S2) já dependem sem checagem própria. Nenhuma função nova precisa reimplementar detecção de ciclo.
+- Testes de função SQL (Tasks 1-3) seguem o padrão S2/S3/S4: verificação via `execute_sql` direto no projeto live, fixtures próprios criados e limpos dentro da própria task — **não** viram arquivo `.test.ts`. Função pública lida via `auth.uid()`: testar simulando sessão com `SET LOCAL request.jwt.claims = '{"sub":"<user_id>"}'` antes de chamar. Função interna com `p_actor_uid` explícito: chamar direto, sem `SET LOCAL`.
+- Testes de código Next.js (Tasks 5-11) rodam com `cd web && npx vitest run <caminho>`.
 - `ssrClient()` = `web/lib/supabase/ssr.ts` — rotas usam `ssrClient`, nunca `adminClient`.
 - Sem página de login no app ainda — página `/dashboard` mostra mensagem simples quando não autenticado, **sem redirecionar** (mesmo padrão de `/mapa-calor`, decisão do S4 mantida).
+- Limiares das regras de alerta (Task 3) ficam como constantes nomeadas no corpo da função (`v_limiar_penetracao`, `v_dias_tenure_minimo`, `v_dias_janela_estagnacao`), não mágicos soltos no meio do SQL — continuam hardcoded por decisão explícita do spec (YAGNI: sem motor de regra configurável nesta fatia), só nomeados pra leitura/manutenção.
 - Commits frequentes; mensagens estilo do repo (`feat(s5): ...`, `test(s5): ...`).
 - Progresso rastreado pela skill `subagent-driven-development` em `.superpowers/sdd/progress-s5.md`.
 
@@ -45,14 +47,20 @@ direto nas migrations antes de escrever este plano:
 
 **Interfaces:**
 - Consumes: `public.subarvore_count(uuid)`, `public.usuario_campanha`, `public.vinculo`, `public.pessoa` (existentes).
-- Produces: `public.ranking_liderancas() RETURNS jsonb` — payload `{ramos: [{pessoa_id, nome, subarvore_count}, ...], soma_ramos: integer, total_real: integer}`, `ramos` já ordenado (`subarvore_count DESC, nome ASC`). Task 5 (rota Next.js) chama via `supabase.rpc('ranking_liderancas')`.
+- Produces: `public.ranking_liderancas() RETURNS TABLE(pessoa_id uuid, nome text, subarvore_count integer, soma_ramos integer, total_real integer)`. **Uma linha por líder do ranking**, ordenado (`subarvore_count DESC, nome ASC`); `soma_ramos`/`total_real` vêm repetidos (mesmo valor) em toda linha — resumo do conjunto inteiro, não específico de cada líder. **Tabela vazia (0 linhas)** quando não há líder no escopo do actor — o cliente trata isso como "nenhum líder ainda" e assume `soma_ramos=0`/`total_real=0`. Task 5 (rota Next.js) chama via `supabase.rpc('ranking_liderancas')`.
 
 - [ ] **Step 1: Escrever a migration**
 
 ```sql
 -- 0044_ranking_liderancas.sql
 CREATE OR REPLACE FUNCTION public.ranking_liderancas()
-RETURNS jsonb
+RETURNS TABLE (
+  pessoa_id       uuid,
+  nome            text,
+  subarvore_count integer,
+  soma_ramos      integer,
+  total_real      integer
+)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
 AS $$
 DECLARE
@@ -60,16 +68,18 @@ DECLARE
   v_papel       public.papel_login;
   v_pessoa_id   uuid;
   v_topo        boolean;
-  v_result      jsonb;
 BEGIN
   SELECT campanha_id, papel, pessoa_id INTO v_campanha_id, v_papel, v_pessoa_id
     FROM public.usuario_campanha WHERE user_id = auth.uid();
-  IF v_campanha_id IS NULL THEN
-    RETURN jsonb_build_object('ramos', '[]'::jsonb, 'soma_ramos', 0, 'total_real', 0);
-  END IF;
+  IF v_campanha_id IS NULL THEN RETURN; END IF;
 
   v_topo := v_papel IN ('gestor', 'coordenador');
 
+  -- Recursão sobre vinculo é segura contra ciclo: trg_vinculo_ciclo_check
+  -- (S2, migration 0017) bloqueia no INSERT qualquer vínculo que criaria um
+  -- ciclo — mesma garantia da qual subarvore_count/pessoa_em_subarvore_do_actor
+  -- (S2) já dependem sem checagem própria.
+  RETURN QUERY
   WITH RECURSIVE ramos_raw AS (
     -- Gestor/coordenador: líderes de topo (vínculo próprio sem responsável
     -- acima). Liderança: só os subordinados diretos dela.
@@ -97,27 +107,23 @@ BEGIN
     SELECT v3.pessoa_id FROM public.vinculo v3
       JOIN sub ON sub.pessoa_id = v3.responsavel_id
      WHERE v3.campanha_id = v_campanha_id
+  ),
+  totais AS (
+    SELECT
+      coalesce((SELECT sum(subarvore_count) FROM ramos), 0)::integer AS soma_ramos,
+      coalesce((SELECT count(DISTINCT pessoa_id) FROM sub), 0)::integer AS total_real
   )
-  SELECT jsonb_build_object(
-    'ramos', coalesce(
-      (SELECT jsonb_agg(jsonb_build_object(
-                'pessoa_id', ramos.pessoa_id,
-                'nome', ramos.nome,
-                'subarvore_count', ramos.subarvore_count
-              ) ORDER BY ramos.subarvore_count DESC, ramos.nome ASC)
-         FROM ramos),
-      '[]'::jsonb
-    ),
-    'soma_ramos', coalesce((SELECT sum(subarvore_count) FROM ramos), 0),
-    'total_real', coalesce((SELECT count(DISTINCT pessoa_id) FROM sub), 0)
-  ) INTO v_result;
-
-  RETURN v_result;
+  SELECT ramos.pessoa_id, ramos.nome, ramos.subarvore_count,
+         totais.soma_ramos, totais.total_real
+    FROM ramos, totais
+   ORDER BY ramos.subarvore_count DESC, ramos.nome ASC;
 END;
 $$;
 REVOKE ALL ON FUNCTION public.ranking_liderancas() FROM public, anon;
 GRANT EXECUTE ON FUNCTION public.ranking_liderancas() TO authenticated;
 ```
+
+Nota: `FROM ramos, totais` é um cross join — se `ramos` estiver vazio, o resultado inteiro é 0 linhas (não uma linha com `NULL`s), que é exatamente o "coleção vazia sem erro" da decisão 10 do spec.
 
 - [ ] **Step 2: Aplicar via `mcp__supabase__apply_migration`**
 
@@ -192,35 +198,29 @@ console.log('fixture pronta.');
 Substitua `<gestor_user_id>`/`<liderb_user_id>` pelos valores impressos no Step 3.
 
 ```sql
--- Gestor: vê os 2 líderes de topo (CoordA, CoordE)
+-- Gestor: vê os 2 líderes de topo (CoordA, CoordE).
 SET LOCAL request.jwt.claims = '{"sub":"<gestor_user_id>"}';
-SELECT public.ranking_liderancas();
--- esperado (formato): {
---   "ramos": [
---     {"pessoa_id": "<coordA>", "nome": "CoordA", "subarvore_count": 4},
---     {"pessoa_id": "<coordE>", "nome": "CoordE", "subarvore_count": 1}
---   ],
---   "soma_ramos": 5,
---   "total_real": 4
--- }
--- CoordA: LiderB + ApoiadorC + ApoiadorD + ApoiadorCompartilhado = 4.
--- CoordE: ApoiadorCompartilhado = 1.
--- total_real = 4 (LiderB, ApoiadorC, ApoiadorD, ApoiadorCompartilhado — sem
--- duplicar o compartilhado). soma_ramos(5) - total_real(4) = 1 = o
--- ApoiadorCompartilhado, exatamente a nota do ADR 0003.
--- ramos ordenado por subarvore_count DESC (CoordA antes de CoordE).
+SELECT pessoa_id, nome, subarvore_count, soma_ramos, total_real
+  FROM public.ranking_liderancas();
+-- esperado: 2 linhas —
+--   CoordA: subarvore_count=4 (LiderB+ApoiadorC+ApoiadorD+ApoiadorCompartilhado)
+--   CoordE: subarvore_count=1 (ApoiadorCompartilhado)
+-- ambas com soma_ramos=5, total_real=4 (LiderB, ApoiadorC, ApoiadorD,
+-- ApoiadorCompartilhado — sem duplicar o compartilhado).
+-- soma_ramos(5) - total_real(4) = 1 = o ApoiadorCompartilhado — a nota do
+-- ADR 0003. Ordenado: CoordA (subarvore_count maior) antes de CoordE.
 
 -- Liderança (LiderB): só o subordinado direto dela (ApoiadorC), que não
--- tem descendentes — subarvore_count=0 (ApoiadorC não conta a si mesma).
+-- tem descendentes — subarvore_count=0.
 SET LOCAL request.jwt.claims = '{"sub":"<liderb_user_id>"}';
-SELECT public.ranking_liderancas();
--- esperado: {"ramos": [{"pessoa_id": "<apoiadorC>", "nome": "ApoiadorC",
---   "subarvore_count": 0}], "soma_ramos": 0, "total_real": 0}
+SELECT pessoa_id, nome, subarvore_count, soma_ramos, total_real
+  FROM public.ranking_liderancas();
+-- esperado: 1 linha — ApoiadorC, subarvore_count=0, soma_ramos=0, total_real=0
 
--- Usuário sem usuario_campanha: retorna zerado, não erro
+-- Usuário sem usuario_campanha: 0 linhas, não erro
 SET LOCAL request.jwt.claims = '{"sub":"' || gen_random_uuid() || '"}';
-SELECT public.ranking_liderancas();
--- esperado: {"ramos": [], "soma_ramos": 0, "total_real": 0}
+SELECT count(*) FROM public.ranking_liderancas();
+-- esperado: 0
 ```
 
 - [ ] **Step 5: Limpar a fixture**
@@ -299,7 +299,7 @@ REVOKE ALL ON FUNCTION public.evolucao_pessoas() FROM public, anon;
 GRANT EXECUTE ON FUNCTION public.evolucao_pessoas() TO authenticated;
 ```
 
-`CURRENT_DATE`, não `now()`, em toda a função — garante resultado determinístico durante todo o dia (decisão 5 do spec). Nota de performance: `pessoa_em_subarvore_do_actor` roda por pessoa candidata por dia (90 × N) — mesmo trade-off já aceito em `forca_por_area` (S4) na escala MVP.
+`CURRENT_DATE`, não `now()`, em toda a função — garante resultado determinístico durante todo o dia (decisão 5 do spec). Nota de performance: `pessoa_em_subarvore_do_actor` roda por pessoa candidata por dia (90 × N) — mesmo trade-off já aceito em `forca_por_area` (S4) na escala MVP; se a campanha crescer pra dezenas de milhares de pessoas, materializar essa série vira candidato natural de otimização futura (fora de escopo aqui).
 
 - [ ] **Step 2: Aplicar via `mcp__supabase__apply_migration`**
 
@@ -404,53 +404,73 @@ git commit -m "feat(s5): evolucao_pessoas — série diária de 90 pontos, CURRE
 
 ---
 
-### Task 3: `dashboard_alertas()` — alerta de área + liderança estagnada
+### Task 3: `dashboard_alertas_area` + `dashboard_alertas_lideranca` (internas) + `dashboard_alertas` (pública)
 
 **Files:**
 - Create: `supabase/migrations/0046_dashboard_alertas.sql`
 
 **Interfaces:**
 - Consumes: `public.mapa_calor_agregado('zona')` (S4), `public.usuario_campanha`, `public.vinculo`, `public.pessoa`.
-- Produces: `public.dashboard_alertas() RETURNS TABLE(tipo text, alvo_id text, label text, detalhe jsonb)`. Task 7 (rota Next.js) chama via `supabase.rpc('dashboard_alertas')`.
+- Produces:
+  - `public.dashboard_alertas_area() RETURNS TABLE(alvo_id text, label text, detalhe jsonb)` — interna, `REVOKE`d de `authenticated`. Não recebe `p_actor_uid` explícito porque **depende de `mapa_calor_agregado`, que por sua vez exige `auth.uid()` de sessão** — não há como desacoplar sem reimplementar a leitura de Força/Potencial; lê `auth.uid()` internamente pelo mesmo motivo (documentado no corpo, ver Step 1).
+  - `public.dashboard_alertas_lideranca(p_actor_uid uuid) RETURNS TABLE(alvo_id text, label text, detalhe jsonb)` — interna, `REVOKE`d de `authenticated`, recebe identidade como parâmetro explícito (não depende de nenhuma função `auth.uid()`-only) — testável direto via `execute_sql`, mesmo padrão do `forca_por_area` (S4).
+  - `public.dashboard_alertas() RETURNS TABLE(tipo text, alvo_id text, label text, detalhe jsonb)` — pública, `GRANT`ada a `authenticated`, lê `auth.uid()` uma vez e compõe as duas internas. Task 7 (rota Next.js) chama via `supabase.rpc('dashboard_alertas')`.
 
 - [ ] **Step 1: Escrever a migration**
 
 ```sql
 -- 0046_dashboard_alertas.sql
-CREATE OR REPLACE FUNCTION public.dashboard_alertas()
-RETURNS TABLE (tipo text, alvo_id text, label text, detalhe jsonb)
+
+-- Interna: alerta de área. Só chamada pela pública abaixo, quando o papel
+-- do actor qualifica (gestor/coordenador) — a checagem de papel mora na
+-- função pública, não aqui, porque esta função sozinha não sabe "pra quem"
+-- ela está rodando de forma independente de auth.uid() (mapa_calor_agregado
+-- já é auth.uid()-only, então esta função herda a mesma restrição).
+CREATE OR REPLACE FUNCTION public.dashboard_alertas_area()
+RETURNS TABLE (alvo_id text, label text, detalhe jsonb)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+  WITH areas AS (
+    SELECT * FROM public.mapa_calor_agregado('zona')
+  ),
+  media AS (
+    SELECT avg(potencial) AS media_potencial FROM areas
+  )
+  SELECT a.area_id, a.area_nome,
+    jsonb_build_object(
+      'potencial', a.potencial,
+      'penetracao', a.penetracao,
+      'media_potencial', round(m.media_potencial, 2)
+    )
+  FROM areas a, media m
+  -- limiar de penetração = 0.05 (5%) — decisão 6 do spec, hardcoded por
+  -- YAGNI (sem motor de regra configurável nesta fatia).
+  WHERE a.potencial > m.media_potencial AND a.penetracao < 0.05;
+$$;
+REVOKE ALL ON FUNCTION public.dashboard_alertas_area() FROM public, authenticated, anon;
+
+-- Interna: alerta de liderança estagnada. Recebe p_actor_uid explícito —
+-- não depende de nenhuma função auth.uid()-only, então é diretamente
+-- testável via execute_sql sem simular sessão (mesmo padrão do
+-- forca_por_area, S4).
+CREATE OR REPLACE FUNCTION public.dashboard_alertas_lideranca(p_actor_uid uuid)
+RETURNS TABLE (alvo_id text, label text, detalhe jsonb)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
 AS $$
 DECLARE
-  v_campanha_id uuid;
-  v_papel       public.papel_login;
-  v_pessoa_id   uuid;
+  v_campanha_id             uuid;
+  v_papel                   public.papel_login;
+  v_pessoa_id               uuid;
+  v_dias_tenure_minimo      constant integer := 30;
+  v_dias_janela_estagnacao  constant integer := 30;
 BEGIN
   SELECT campanha_id, papel, pessoa_id INTO v_campanha_id, v_papel, v_pessoa_id
-    FROM public.usuario_campanha WHERE user_id = auth.uid();
+    FROM public.usuario_campanha WHERE user_id = p_actor_uid;
   IF v_campanha_id IS NULL THEN RETURN; END IF;
 
-  -- Alerta de área: só gestor/coordenador (não é conceito de sub-árvore).
-  IF v_papel IN ('gestor', 'coordenador') THEN
-    RETURN QUERY
-    WITH areas AS (
-      SELECT * FROM public.mapa_calor_agregado('zona')
-    ),
-    media AS (
-      SELECT avg(potencial) AS media_potencial FROM areas
-    )
-    SELECT 'area'::text, a.area_id, a.area_nome,
-      jsonb_build_object(
-        'potencial', a.potencial,
-        'penetracao', a.penetracao,
-        'media_potencial', round(m.media_potencial, 2)
-      )
-    FROM areas a, media m
-    WHERE a.potencial > m.media_potencial AND a.penetracao < 0.05;
-  END IF;
-
-  -- Alerta de liderança estagnada: líder com tenure >= 30 dias e zero
-  -- inserção na sub-árvore (qualquer profundidade) em 30 dias.
+  -- Recursão sobre vinculo é segura contra ciclo: trg_vinculo_ciclo_check
+  -- (S2, migration 0017) bloqueia no INSERT qualquer vínculo que criaria um
+  -- ciclo — mesma garantia já usada sem checagem própria em subarvore_count.
   RETURN QUERY
   WITH lideres AS (
     SELECT DISTINCT ON (v.pessoa_id) v.pessoa_id, v.criado_em AS lider_desde
@@ -467,11 +487,11 @@ BEGIN
        )
      ORDER BY v.pessoa_id, v.criado_em ASC
   )
-  SELECT 'lideranca_estagnada'::text, l.pessoa_id::text, p.nome,
+  SELECT l.pessoa_id::text, p.nome,
     jsonb_build_object('lider_desde', l.lider_desde)
   FROM lideres l
   JOIN public.pessoa p ON p.id = l.pessoa_id
-  WHERE l.lider_desde::date <= CURRENT_DATE - 30
+  WHERE l.lider_desde::date <= CURRENT_DATE - v_dias_tenure_minimo
     AND NOT EXISTS (
       WITH RECURSIVE sub AS (
         SELECT v2.pessoa_id FROM public.vinculo v2
@@ -483,8 +503,34 @@ BEGIN
       )
       SELECT 1 FROM public.pessoa pd
        WHERE pd.id IN (SELECT pessoa_id FROM sub)
-         AND pd.criado_em::date >= CURRENT_DATE - 30
+         AND pd.criado_em::date >= CURRENT_DATE - v_dias_janela_estagnacao
     );
+END;
+$$;
+REVOKE ALL ON FUNCTION public.dashboard_alertas_lideranca(uuid) FROM public, authenticated, anon;
+
+-- Pública: única GRANT'ada, lê auth.uid() uma vez e compõe as 2 internas —
+-- mesmo padrão de composição do mapa_calor_agregado (S4).
+CREATE OR REPLACE FUNCTION public.dashboard_alertas()
+RETURNS TABLE (tipo text, alvo_id text, label text, detalhe jsonb)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+DECLARE
+  v_papel public.papel_login;
+BEGIN
+  SELECT papel INTO v_papel FROM public.usuario_campanha WHERE user_id = auth.uid();
+  IF v_papel IS NULL THEN RETURN; END IF;
+
+  -- Alerta de área: só gestor/coordenador (não é conceito de sub-árvore).
+  IF v_papel IN ('gestor', 'coordenador') THEN
+    RETURN QUERY
+    SELECT 'area'::text, a.alvo_id, a.label, a.detalhe
+      FROM public.dashboard_alertas_area() a;
+  END IF;
+
+  RETURN QUERY
+  SELECT 'lideranca_estagnada'::text, l.alvo_id, l.label, l.detalhe
+    FROM public.dashboard_alertas_lideranca(auth.uid()) l;
 END;
 $$;
 REVOKE ALL ON FUNCTION public.dashboard_alertas() FROM public, anon;
@@ -535,7 +581,7 @@ const liderAtivo = await criarPessoa('Lider Ativo'); // 35 dias, apoiador novo h
 const apoiadorNovo = await criarPessoa('Apoiador Novo do Ativo');
 const liderRecente = await criarPessoa('Lider Recente'); // só 10 dias de tenure — não deve alertar
 
-console.log({ liderEstagnado, apoiadorAntigo, liderAtivo, apoiadorNovo, liderRecente });
+console.log({ gestorUserId: gestorUser.user.id, liderEstagnado, apoiadorAntigo, liderAtivo, apoiadorNovo, liderRecente });
 
 await admin.from('vinculo').insert([
   { campanha_id: camp.id, pessoa_id: liderEstagnado, responsavel_id: null, papel: 'lideranca' },
@@ -548,7 +594,7 @@ await admin.from('vinculo').insert([
 console.log('fixture pronta — próximo passo: backdatar via execute_sql (Step 4).');
 ```
 
-- [ ] **Step 4: Backdatar tenure/criado_em via `execute_sql` e verificar**
+- [ ] **Step 4: Backdatar tenure/criado_em e testar `dashboard_alertas_lideranca` direto (sem simular sessão — parâmetro explícito)**
 
 Substitua os placeholders pelos valores do Step 3.
 
@@ -567,44 +613,40 @@ UPDATE public.pessoa SET criado_em = CURRENT_DATE - 5 WHERE id = '<apoiadorNovo>
 UPDATE public.vinculo SET criado_em = now() - interval '10 days'
  WHERE pessoa_id = '<liderRecente>' AND responsavel_id IS NULL;
 
-SET LOCAL request.jwt.claims = '{"sub":"<gestor_user_id>"}';
-
-SELECT tipo, alvo_id, label FROM public.dashboard_alertas() WHERE tipo = 'lideranca_estagnada';
+-- Chamada direta, sem SET LOCAL — dashboard_alertas_lideranca recebe o
+-- actor_uid como parâmetro explícito.
+SELECT alvo_id, label FROM public.dashboard_alertas_lideranca('<gestor_user_id>');
 -- esperado: exatamente 1 linha — alvo_id = <liderEstagnado>, label = 'Lider Estagnado'.
 -- Lider Ativo não aparece (teve inserção recente). Lider Recente não aparece
 -- (tenure < 30 dias).
 ```
 
-- [ ] **Step 5: Verificar alerta de área contra o lote real de Teresina (municipio_id=2211001, já publicado no S4)**
+- [ ] **Step 5: Verificar alerta de área contra o lote real de Teresina (municipio_id=2211001, já publicado no S4) e a função pública completa**
 
 ```sql
--- Mesmo gestor da fixture (campanha municipal, municipio_id=2211001 — mapa_calor_agregado enxerga o lote real).
+-- dashboard_alertas_area não recebe parâmetro (depende de mapa_calor_agregado,
+-- que exige auth.uid() de sessão) — testar via a função PÚBLICA, simulando
+-- sessão do gestor da fixture.
+SET LOCAL request.jwt.claims = '{"sub":"<gestor_user_id>"}';
+
 SELECT tipo, alvo_id, detalhe FROM public.dashboard_alertas() WHERE tipo = 'area';
 -- esperado: 0 ou mais linhas, cada uma com detalhe.potencial > detalhe.media_potencial
 -- e detalhe.penetracao < 0.05 (Força real da fixture é 0 em toda área, então
 -- se o lote real tiver alguma zona com potencial acima da média, ela DEVE
 -- aparecer aqui — penetração=0 é sempre < 0.05). Documentar quantas apareceram.
 
--- Confirmar que nenhuma área com penetração >= 0.05 aparece, mesmo que
--- potencial seja alto (checagem negativa manual sobre o resultado acima
--- comparado a SELECT * FROM public.mapa_calor_agregado('zona')).
+SELECT tipo, alvo_id, label FROM public.dashboard_alertas() WHERE tipo = 'lideranca_estagnada';
+-- esperado: mesmo resultado do Step 4 (1 linha, Lider Estagnado) — confirma
+-- que a função pública repassa corretamente pra dashboard_alertas_lideranca.
+
+-- Escopo por papel: alerta de área é condicional no corpo da função pública
+-- (IF v_papel IN ('gestor','coordenador')) — não precisa de fixture nova pra
+-- confirmar que uma liderança nunca recebe tipo='area'; é um branch
+-- estruturalmente óbvio lendo o Step 1, não um comportamento a redescobrir
+-- por teste.
 ```
 
-- [ ] **Step 6: Verificar escopo por papel**
-
-```sql
--- Liderança (usando o mesmo mecanismo — crie um usuario_campanha extra
--- papel='lideranca', pessoa_id=<liderEstagnado> pra este teste específico,
--- reaproveitando o usuário gestor não serve pois ele já é 'gestor'):
--- pule este sub-passo se preferir testar só a via gestor/coordenador já
--- coberta acima — o caso liderança usa a MESMA query de alertas, já
--- coberta estruturalmente pelo teste de ranking_liderancas (Task 1) quanto
--- a escopo de vínculo; aqui, confirmar apenas que tipo='area' NUNCA aparece
--- pra um papel fora de ('gestor','coordenador') lendo o corpo da função
--- (branch condicional explícito) — não precisa de fixture nova.
-```
-
-- [ ] **Step 7: Limpar a fixture**
+- [ ] **Step 6: Limpar a fixture**
 
 ```sql
 DELETE FROM public.vinculo WHERE campanha_id = '<campanha_id>';
@@ -617,15 +659,15 @@ DELETE FROM public.campanha WHERE id = '<campanha_id>';
 await admin.auth.admin.deleteUser('<gestor_user_id>');
 ```
 
-- [ ] **Step 8: `get_advisors(type=security)`**
+- [ ] **Step 7: `get_advisors(type=security)`**
 
 Confirmar zero alertas novos.
 
-- [ ] **Step 9: Salvar cópia e commitar**
+- [ ] **Step 8: Salvar cópia e commitar**
 
 ```bash
 git add supabase/migrations/0046_dashboard_alertas.sql
-git commit -m "feat(s5): dashboard_alertas — alerta de área e de liderança estagnada"
+git commit -m "feat(s5): dashboard_alertas — área + liderança estagnada, composição de 2 internas"
 ```
 
 ---
@@ -636,7 +678,6 @@ git commit -m "feat(s5): dashboard_alertas — alerta de área e de liderança e
 - Create: `web/app/components/NavShell.tsx`
 - Create: `web/app/components/NavShell.test.tsx`
 - Modify: `web/app/mapa-calor/MapaCalorClient.tsx` (envolve o conteúdo existente com `<NavShell>`)
-- Modify: `web/app/mapa-calor/MapaCalorClient.test.tsx` (ajusta seletores se necessário — ver Step 4)
 
 **Interfaces:**
 - Produces: `NavShell({ children }: { children: React.ReactNode })` — componente puro, sem fetch, sem estado. Renderiza header com 2 links (`/mapa-calor`, `/dashboard`) + `{children}` abaixo. Task 8 (`DashboardClient`) e este task (`MapaCalorClient`) consomem.
@@ -708,7 +749,7 @@ E no `return`, envolver o `<div>` raiz existente (o que contém os 2 `<label>` d
 - [ ] **Step 6: Rodar a suíte de `MapaCalorClient` e confirmar que ainda passa**
 
 Run: `cd web && npx vitest run app/mapa-calor/MapaCalorClient.test.tsx`
-Expected: PASS — os testes existentes usam `screen.getByLabelText`/`getByRole('alert')`, que continuam funcionando com o novo wrapper (não removem nenhum elemento, só adicionam um header em volta). Se algum teste falhar por causa de múltiplos elementos `<nav>`/`<main>` ambíguos, não deve acontecer aqui pois os testes não fazem query por tag genérica.
+Expected: PASS — os testes existentes usam `screen.getByLabelText`/`getByRole('alert')`, que continuam funcionando com o novo wrapper (não removem nenhum elemento, só adicionam um header em volta).
 
 - [ ] **Step 7: Commit**
 
@@ -719,65 +760,60 @@ git commit -m "feat(s5): NavShell compartilhado, integrado em /mapa-calor"
 
 ---
 
-### Task 5: `GET /api/dashboard/ranking`
+### Task 5: `authenticatedRpc` helper + `GET /api/dashboard/ranking`
 
 **Files:**
+- Create: `web/lib/supabase/authenticated-rpc.ts`
+- Create: `web/lib/supabase/authenticated-rpc.test.ts`
 - Create: `web/app/api/dashboard/ranking/route.ts`
 - Create: `web/app/api/dashboard/ranking/route.test.ts`
 
 **Interfaces:**
-- Consumes: `ssrClient` (`web/lib/supabase/ssr.ts`), RPC `ranking_liderancas` (Task 1).
-- Produces: `GET` handler retornando `NextResponse` com `{ramos, soma_ramos, total_real}` (200), `{erro}` (401/500). Task 9 (`RankingTable`) faz `fetch('/api/dashboard/ranking')`.
+- Consumes: `ssrClient` (`web/lib/supabase/ssr.ts`).
+- Produces: `authenticatedRpc(rpcName: string): Promise<NextResponse>` — checa sessão (401 se ausente), chama `supabase.rpc(rpcName)`, retorna `NextResponse.json(data)` (200) ou `{erro}` (401/500). Tasks 6-7 (rotas `evolucao`/`alertas`) reusam este helper — elimina a triplicação de `ssrClient`+`getUser`+`rpc`+erro entre as 3 rotas.
 
-- [ ] **Step 1: Escrever o teste**
+- [ ] **Step 1: Escrever o teste do helper**
 
 ```typescript
-// web/app/api/dashboard/ranking/route.test.ts
+// web/lib/supabase/authenticated-rpc.test.ts
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('next/headers', () => ({ cookies: vi.fn(async () => ({ getAll: () => [] })) }));
 
-const mockRanking = {
-  ramos: [{ pessoa_id: 'p-1', nome: 'Lider A', subarvore_count: 3 }],
-  soma_ramos: 3,
-  total_real: 3,
-};
-
 function mockSupabase(overrides: Partial<{ user: { id: string } | null; rpcData: unknown; rpcError: unknown }> = {}) {
-  const { user = { id: 'u-1' }, rpcData = mockRanking, rpcError = null } = overrides;
+  const { user = { id: 'u-1' }, rpcData = [{ ok: true }], rpcError = null } = overrides;
   return {
     auth: { getUser: vi.fn(async () => ({ data: { user }, error: null })) },
     rpc: vi.fn(async () => ({ data: rpcData, error: rpcError })),
   };
 }
 
-vi.mock('../../../../lib/supabase/ssr', () => ({ ssrClient: vi.fn() }));
+vi.mock('./ssr', () => ({ ssrClient: vi.fn() }));
 
-import { GET } from './route';
-import { ssrClient } from '../../../../lib/supabase/ssr';
+import { authenticatedRpc } from './authenticated-rpc';
+import { ssrClient } from './ssr';
 
-describe('GET /api/dashboard/ranking', () => {
-  it('retorna o payload de ranking_liderancas', async () => {
-    const supabase = mockSupabase();
+describe('authenticatedRpc', () => {
+  it('retorna 200 com o payload da RPC', async () => {
+    const supabase = mockSupabase({ rpcData: [{ a: 1 }] });
     vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
+    const res = await authenticatedRpc('minha_funcao');
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual(mockRanking);
-    expect(supabase.rpc).toHaveBeenCalledWith('ranking_liderancas');
+    expect(await res.json()).toEqual([{ a: 1 }]);
+    expect(supabase.rpc).toHaveBeenCalledWith('minha_funcao');
   });
 
   it('401 sem sessão', async () => {
     const supabase = mockSupabase({ user: null });
     vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
+    const res = await authenticatedRpc('minha_funcao');
     expect(res.status).toBe(401);
   });
 
   it('500 quando a RPC retorna erro', async () => {
     const supabase = mockSupabase({ rpcError: { message: 'falha' } });
     vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
+    const res = await authenticatedRpc('minha_funcao');
     expect(res.status).toBe(500);
   });
 });
@@ -785,24 +821,24 @@ describe('GET /api/dashboard/ranking', () => {
 
 - [ ] **Step 2: Rodar e confirmar que falha**
 
-Run: `cd web && npx vitest run app/api/dashboard/ranking/route.test.ts`
-Expected: FAIL — `Cannot find module './route'`
+Run: `cd web && npx vitest run lib/supabase/authenticated-rpc.test.ts`
+Expected: FAIL — `Cannot find module './authenticated-rpc'`
 
-- [ ] **Step 3: Implementar a rota**
+- [ ] **Step 3: Implementar o helper**
 
 ```typescript
-// web/app/api/dashboard/ranking/route.ts
-import { NextResponse } from 'next/server';
+// web/lib/supabase/authenticated-rpc.ts
 import { cookies } from 'next/headers';
-import { ssrClient } from '../../../../lib/supabase/ssr';
+import { NextResponse } from 'next/server';
+import { ssrClient } from './ssr';
 
-export async function GET() {
+export async function authenticatedRpc(rpcName: string) {
   const cookieStore = await cookies();
   const supabase = ssrClient(cookieStore);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ erro: 'não autenticado' }, { status: 401 });
 
-  const { data, error } = await supabase.rpc('ranking_liderancas');
+  const { data, error } = await supabase.rpc(rpcName);
   if (error) return NextResponse.json({ erro: error.message }, { status: 500 });
   return NextResponse.json(data);
 }
@@ -810,14 +846,56 @@ export async function GET() {
 
 - [ ] **Step 4: Rodar e confirmar que passa**
 
-Run: `cd web && npx vitest run app/api/dashboard/ranking/route.test.ts`
+Run: `cd web && npx vitest run lib/supabase/authenticated-rpc.test.ts`
 Expected: PASS — 3/3
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Escrever o teste da rota `ranking` (thin — confirma só que chama o helper com o nome certo)**
+
+```typescript
+// web/app/api/dashboard/ranking/route.test.ts
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('../../../../lib/supabase/authenticated-rpc', () => ({
+  authenticatedRpc: vi.fn(async () => new Response(null, { status: 200 })),
+}));
+
+import { GET } from './route';
+import { authenticatedRpc } from '../../../../lib/supabase/authenticated-rpc';
+
+describe('GET /api/dashboard/ranking', () => {
+  it('chama authenticatedRpc com "ranking_liderancas"', async () => {
+    await GET();
+    expect(authenticatedRpc).toHaveBeenCalledWith('ranking_liderancas');
+  });
+});
+```
+
+- [ ] **Step 6: Rodar e confirmar que falha**
+
+Run: `cd web && npx vitest run app/api/dashboard/ranking/route.test.ts`
+Expected: FAIL — `Cannot find module './route'`
+
+- [ ] **Step 7: Implementar a rota**
+
+```typescript
+// web/app/api/dashboard/ranking/route.ts
+import { authenticatedRpc } from '../../../../lib/supabase/authenticated-rpc';
+
+export async function GET() {
+  return authenticatedRpc('ranking_liderancas');
+}
+```
+
+- [ ] **Step 8: Rodar e confirmar que passa**
+
+Run: `cd web && npx vitest run app/api/dashboard/ranking/route.test.ts`
+Expected: PASS — 1/1
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add web/app/api/dashboard/ranking/route.ts web/app/api/dashboard/ranking/route.test.ts
-git commit -m "feat(s5): GET /api/dashboard/ranking"
+git add web/lib/supabase/authenticated-rpc.ts web/lib/supabase/authenticated-rpc.test.ts web/app/api/dashboard/ranking/route.ts web/app/api/dashboard/ranking/route.test.ts
+git commit -m "feat(s5): authenticatedRpc helper + GET /api/dashboard/ranking"
 ```
 
 ---
@@ -829,8 +907,8 @@ git commit -m "feat(s5): GET /api/dashboard/ranking"
 - Create: `web/app/api/dashboard/evolucao/route.test.ts`
 
 **Interfaces:**
-- Consumes: `ssrClient`, RPC `evolucao_pessoas` (Task 2).
-- Produces: `GET` handler retornando array `{dia, total}[]` (200), `{erro}` (401/500). Task 10 (`EvolucaoChart`) faz `fetch('/api/dashboard/evolucao')`.
+- Consumes: `authenticatedRpc` (Task 5).
+- Produces: `GET` handler retornando array `{dia, total}[]` (200) via `authenticatedRpc('evolucao_pessoas')`. Task 10 (`EvolucaoChart`) faz `fetch('/api/dashboard/evolucao')`.
 
 - [ ] **Step 1: Escrever o teste**
 
@@ -838,49 +916,17 @@ git commit -m "feat(s5): GET /api/dashboard/ranking"
 // web/app/api/dashboard/evolucao/route.test.ts
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('next/headers', () => ({ cookies: vi.fn(async () => ({ getAll: () => [] })) }));
-
-const mockEvolucao = [
-  { dia: '2026-07-03', total: 10 },
-  { dia: '2026-07-04', total: 11 },
-];
-
-function mockSupabase(overrides: Partial<{ user: { id: string } | null; rpcData: unknown; rpcError: unknown }> = {}) {
-  const { user = { id: 'u-1' }, rpcData = mockEvolucao, rpcError = null } = overrides;
-  return {
-    auth: { getUser: vi.fn(async () => ({ data: { user }, error: null })) },
-    rpc: vi.fn(async () => ({ data: rpcData, error: rpcError })),
-  };
-}
-
-vi.mock('../../../../lib/supabase/ssr', () => ({ ssrClient: vi.fn() }));
+vi.mock('../../../../lib/supabase/authenticated-rpc', () => ({
+  authenticatedRpc: vi.fn(async () => new Response(null, { status: 200 })),
+}));
 
 import { GET } from './route';
-import { ssrClient } from '../../../../lib/supabase/ssr';
+import { authenticatedRpc } from '../../../../lib/supabase/authenticated-rpc';
 
 describe('GET /api/dashboard/evolucao', () => {
-  it('retorna o payload de evolucao_pessoas', async () => {
-    const supabase = mockSupabase();
-    vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual(mockEvolucao);
-    expect(supabase.rpc).toHaveBeenCalledWith('evolucao_pessoas');
-  });
-
-  it('401 sem sessão', async () => {
-    const supabase = mockSupabase({ user: null });
-    vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
-    expect(res.status).toBe(401);
-  });
-
-  it('500 quando a RPC retorna erro', async () => {
-    const supabase = mockSupabase({ rpcError: { message: 'falha' } });
-    vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
-    expect(res.status).toBe(500);
+  it('chama authenticatedRpc com "evolucao_pessoas"', async () => {
+    await GET();
+    expect(authenticatedRpc).toHaveBeenCalledWith('evolucao_pessoas');
   });
 });
 ```
@@ -894,26 +940,17 @@ Expected: FAIL — `Cannot find module './route'`
 
 ```typescript
 // web/app/api/dashboard/evolucao/route.ts
-import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
-import { ssrClient } from '../../../../lib/supabase/ssr';
+import { authenticatedRpc } from '../../../../lib/supabase/authenticated-rpc';
 
 export async function GET() {
-  const cookieStore = await cookies();
-  const supabase = ssrClient(cookieStore);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ erro: 'não autenticado' }, { status: 401 });
-
-  const { data, error } = await supabase.rpc('evolucao_pessoas');
-  if (error) return NextResponse.json({ erro: error.message }, { status: 500 });
-  return NextResponse.json(data);
+  return authenticatedRpc('evolucao_pessoas');
 }
 ```
 
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/api/dashboard/evolucao/route.test.ts`
-Expected: PASS — 3/3
+Expected: PASS — 1/1
 
 - [ ] **Step 5: Commit**
 
@@ -931,8 +968,8 @@ git commit -m "feat(s5): GET /api/dashboard/evolucao"
 - Create: `web/app/api/dashboard/alertas/route.test.ts`
 
 **Interfaces:**
-- Consumes: `ssrClient`, RPC `dashboard_alertas` (Task 3).
-- Produces: `GET` handler retornando array `{tipo, alvo_id, label, detalhe}[]` (200), `{erro}` (401/500). Task 11 (`AlertasList`) faz `fetch('/api/dashboard/alertas')`.
+- Consumes: `authenticatedRpc` (Task 5).
+- Produces: `GET` handler retornando array `{tipo, alvo_id, label, detalhe}[]` (200) via `authenticatedRpc('dashboard_alertas')`. Task 11 (`AlertasList`) faz `fetch('/api/dashboard/alertas')`.
 
 - [ ] **Step 1: Escrever o teste**
 
@@ -940,48 +977,17 @@ git commit -m "feat(s5): GET /api/dashboard/evolucao"
 // web/app/api/dashboard/alertas/route.test.ts
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('next/headers', () => ({ cookies: vi.fn(async () => ({ getAll: () => [] })) }));
-
-const mockAlertas = [
-  { tipo: 'area', alvo_id: 'zona-1', label: '1', detalhe: { potencial: 500, penetracao: 0.01, media_potencial: 300 } },
-];
-
-function mockSupabase(overrides: Partial<{ user: { id: string } | null; rpcData: unknown; rpcError: unknown }> = {}) {
-  const { user = { id: 'u-1' }, rpcData = mockAlertas, rpcError = null } = overrides;
-  return {
-    auth: { getUser: vi.fn(async () => ({ data: { user }, error: null })) },
-    rpc: vi.fn(async () => ({ data: rpcData, error: rpcError })),
-  };
-}
-
-vi.mock('../../../../lib/supabase/ssr', () => ({ ssrClient: vi.fn() }));
+vi.mock('../../../../lib/supabase/authenticated-rpc', () => ({
+  authenticatedRpc: vi.fn(async () => new Response(null, { status: 200 })),
+}));
 
 import { GET } from './route';
-import { ssrClient } from '../../../../lib/supabase/ssr';
+import { authenticatedRpc } from '../../../../lib/supabase/authenticated-rpc';
 
 describe('GET /api/dashboard/alertas', () => {
-  it('retorna o payload de dashboard_alertas', async () => {
-    const supabase = mockSupabase();
-    vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual(mockAlertas);
-    expect(supabase.rpc).toHaveBeenCalledWith('dashboard_alertas');
-  });
-
-  it('401 sem sessão', async () => {
-    const supabase = mockSupabase({ user: null });
-    vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
-    expect(res.status).toBe(401);
-  });
-
-  it('500 quando a RPC retorna erro', async () => {
-    const supabase = mockSupabase({ rpcError: { message: 'falha' } });
-    vi.mocked(ssrClient).mockReturnValue(supabase as never);
-    const res = await GET();
-    expect(res.status).toBe(500);
+  it('chama authenticatedRpc com "dashboard_alertas"', async () => {
+    await GET();
+    expect(authenticatedRpc).toHaveBeenCalledWith('dashboard_alertas');
   });
 });
 ```
@@ -995,26 +1001,17 @@ Expected: FAIL — `Cannot find module './route'`
 
 ```typescript
 // web/app/api/dashboard/alertas/route.ts
-import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
-import { ssrClient } from '../../../../lib/supabase/ssr';
+import { authenticatedRpc } from '../../../../lib/supabase/authenticated-rpc';
 
 export async function GET() {
-  const cookieStore = await cookies();
-  const supabase = ssrClient(cookieStore);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ erro: 'não autenticado' }, { status: 401 });
-
-  const { data, error } = await supabase.rpc('dashboard_alertas');
-  if (error) return NextResponse.json({ erro: error.message }, { status: 500 });
-  return NextResponse.json(data);
+  return authenticatedRpc('dashboard_alertas');
 }
 ```
 
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/api/dashboard/alertas/route.test.ts`
-Expected: PASS — 3/3
+Expected: PASS — 1/1
 
 - [ ] **Step 5: Commit**
 
@@ -1025,18 +1022,21 @@ git commit -m "feat(s5): GET /api/dashboard/alertas"
 
 ---
 
-### Task 8: Página `/dashboard` — checagem de sessão + placeholder
+### Task 8: Página `/dashboard` + `DashboardClient` + stubs dos 3 widgets
 
 **Files:**
 - Create: `web/app/dashboard/page.tsx`
 - Create: `web/app/dashboard/page.test.tsx`
-- Create: `web/app/dashboard/DashboardClient.tsx` (placeholder — Tasks 9-11 substituem pelo conteúdo real)
+- Create: `web/app/dashboard/DashboardClient.tsx`
+- Create: `web/app/dashboard/AlertasList.tsx` (stub — Task 11 substitui o corpo)
+- Create: `web/app/dashboard/EvolucaoChart.tsx` (stub — Task 10 substitui o corpo)
+- Create: `web/app/dashboard/RankingTable.tsx` (stub — Task 9 substitui o corpo)
 
 **Interfaces:**
-- Consumes: `ssrClient`; `DashboardClient` (placeholder nesta task, Tasks 9-11 completam).
-- Produces: página server component em `/dashboard`, sem redirect quando não autenticado (mesmo padrão de `/mapa-calor`).
+- Consumes: `ssrClient`; `NavShell` (Task 4).
+- Produces: página server component em `/dashboard`, sem redirect quando não autenticado (mesmo padrão de `/mapa-calor`). `DashboardClient` já compõe os 3 widgets na ordem final (Alertas → Evolução → Ranking, decisão 8 do spec) desde esta task — Tasks 9-11 **só** substituem o corpo do próprio arquivo do widget (`AlertasList.tsx`/`EvolucaoChart.tsx`/`RankingTable.tsx`), nunca tocam `DashboardClient.tsx` de novo. Cada stub exporta o mesmo nome/assinatura que a versão final terá (`export function X()`, sem props) — Tasks 9-11 não mudam a interface, só o corpo.
 
-- [ ] **Step 1: Escrever o teste**
+- [ ] **Step 1: Escrever o teste da página**
 
 ```tsx
 // web/app/dashboard/page.test.tsx
@@ -1077,7 +1077,7 @@ describe('/dashboard page', () => {
 Run: `cd web && npx vitest run app/dashboard/page.test.tsx`
 Expected: FAIL — `Cannot find module './page'`
 
-- [ ] **Step 3: Implementar a página + placeholder**
+- [ ] **Step 3: Implementar página, `DashboardClient` e os 3 stubs**
 
 ```tsx
 // web/app/dashboard/page.tsx
@@ -1099,16 +1099,45 @@ export default async function DashboardPage() {
 ```
 
 ```tsx
-// web/app/dashboard/DashboardClient.tsx (placeholder — Tasks 9-11 substituem pelo conteúdo real)
+// web/app/dashboard/DashboardClient.tsx
 'use client';
 import { NavShell } from '../components/NavShell';
+import { AlertasList } from './AlertasList';
+import { EvolucaoChart } from './EvolucaoChart';
+import { RankingTable } from './RankingTable';
 
 export function DashboardClient() {
   return (
     <NavShell>
-      <div>dashboard em construção</div>
+      <AlertasList />
+      <EvolucaoChart />
+      <RankingTable />
     </NavShell>
   );
+}
+```
+
+```tsx
+// web/app/dashboard/AlertasList.tsx (stub — Task 11 substitui o corpo, mesma assinatura)
+'use client';
+export function AlertasList() {
+  return <div>alertas em construção</div>;
+}
+```
+
+```tsx
+// web/app/dashboard/EvolucaoChart.tsx (stub — Task 10 substitui o corpo, mesma assinatura)
+'use client';
+export function EvolucaoChart() {
+  return <div>evolução em construção</div>;
+}
+```
+
+```tsx
+// web/app/dashboard/RankingTable.tsx (stub — Task 9 substitui o corpo, mesma assinatura)
+'use client';
+export function RankingTable() {
+  return <div>ranking em construção</div>;
 }
 ```
 
@@ -1120,8 +1149,8 @@ Expected: PASS — 2/2
 - [ ] **Step 5: Commit**
 
 ```bash
-git add web/app/dashboard/page.tsx web/app/dashboard/page.test.tsx web/app/dashboard/DashboardClient.tsx
-git commit -m "feat(s5): página /dashboard — checagem de sessão server-side"
+git add web/app/dashboard/page.tsx web/app/dashboard/page.test.tsx web/app/dashboard/DashboardClient.tsx web/app/dashboard/AlertasList.tsx web/app/dashboard/EvolucaoChart.tsx web/app/dashboard/RankingTable.tsx
+git commit -m "feat(s5): página /dashboard — sessão + DashboardClient com os 3 widgets (stub)"
 ```
 
 ---
@@ -1129,13 +1158,12 @@ git commit -m "feat(s5): página /dashboard — checagem de sessão server-side"
 ### Task 9: `RankingTable` — ranking de lideranças + nota soma≠total
 
 **Files:**
-- Create: `web/app/dashboard/RankingTable.tsx`
+- Modify: `web/app/dashboard/RankingTable.tsx` (substitui o stub da Task 8 — mesma assinatura, `DashboardClient.tsx` não muda)
 - Create: `web/app/dashboard/RankingTable.test.tsx`
-- Modify: `web/app/dashboard/DashboardClient.tsx` (substitui o placeholder por `<RankingTable />`, dentro do `<NavShell>`)
 
 **Interfaces:**
 - Consumes: `GET /api/dashboard/ranking` (Task 5) via `fetch`.
-- Produces: componente `RankingTable` (nenhum prop). Task 12 (verificação manual) usa via `/dashboard`.
+- Produces: componente `RankingTable` completo — array de linhas `{pessoa_id, nome, subarvore_count, soma_ramos, total_real}` (mesmo shape de `ranking_liderancas`, Task 1).
 
 - [ ] **Step 1: Escrever o teste**
 
@@ -1146,14 +1174,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { RankingTable } from './RankingTable';
 
-const mockRanking = {
-  ramos: [
-    { pessoa_id: 'p-1', nome: 'Lider A', subarvore_count: 5 },
-    { pessoa_id: 'p-2', nome: 'Lider B', subarvore_count: 2 },
-  ],
-  soma_ramos: 7,
-  total_real: 6,
-};
+const mockRanking = [
+  { pessoa_id: 'p-1', nome: 'Lider A', subarvore_count: 5, soma_ramos: 7, total_real: 6 },
+  { pessoa_id: 'p-2', nome: 'Lider B', subarvore_count: 2, soma_ramos: 7, total_real: 6 },
+];
 
 describe('RankingTable', () => {
   beforeEach(() => {
@@ -1176,9 +1200,7 @@ describe('RankingTable', () => {
   });
 
   it('mostra estado vazio quando não há líder', async () => {
-    globalThis.fetch = vi.fn(async () => ({
-      ok: true, json: async () => ({ ramos: [], soma_ramos: 0, total_real: 0 }),
-    })) as never;
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => [] })) as never;
     render(<RankingTable />);
     expect(await screen.findByText(/nenhum líder/i)).toBeInTheDocument();
   });
@@ -1196,7 +1218,7 @@ describe('RankingTable', () => {
 - [ ] **Step 2: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run app/dashboard/RankingTable.test.tsx`
-Expected: FAIL — `Cannot find module './RankingTable'`
+Expected: FAIL — stub atual não busca dado nenhum, não tem tabela nem nota
 
 - [ ] **Step 3: Implementar o componente**
 
@@ -1205,11 +1227,16 @@ Expected: FAIL — `Cannot find module './RankingTable'`
 'use client';
 import { useEffect, useState } from 'react';
 
-type Ramo = { pessoa_id: string; nome: string; subarvore_count: number };
-type RankingPayload = { ramos: Ramo[]; soma_ramos: number; total_real: number };
+type RankingRow = {
+  pessoa_id: string;
+  nome: string;
+  subarvore_count: number;
+  soma_ramos: number;
+  total_real: number;
+};
 
 export function RankingTable() {
-  const [dado, setDado] = useState<RankingPayload | null>(null);
+  const [linhas, setLinhas] = useState<RankingRow[] | null>(null);
   const [erro, setErro] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1220,8 +1247,8 @@ export function RankingTable() {
         if (!res.ok) throw new Error('falha ao carregar ranking');
         return res.json();
       })
-      .then((data: RankingPayload) => {
-        if (!cancelado) setDado(data);
+      .then((data: RankingRow[]) => {
+        if (!cancelado) setLinhas(data);
       })
       .catch(() => {
         if (!cancelado) setErro('Não foi possível carregar o ranking.');
@@ -1232,11 +1259,13 @@ export function RankingTable() {
   }, []);
 
   if (erro) return <p role="alert">{erro}</p>;
-  if (!dado) return null;
+  if (!linhas) return null;
 
-  if (dado.ramos.length === 0) {
+  if (linhas.length === 0) {
     return <p>Nenhum líder com sub-árvore ainda.</p>;
   }
+
+  const { soma_ramos, total_real } = linhas[0];
 
   return (
     <section>
@@ -1249,18 +1278,18 @@ export function RankingTable() {
           </tr>
         </thead>
         <tbody>
-          {dado.ramos.map((r) => (
-            <tr key={r.pessoa_id}>
-              <td>{r.nome}</td>
-              <td>{r.subarvore_count}</td>
+          {linhas.map((l) => (
+            <tr key={l.pessoa_id}>
+              <td>{l.nome}</td>
+              <td>{l.subarvore_count}</td>
             </tr>
           ))}
         </tbody>
       </table>
       <p>
-        Soma dos ramos: {dado.soma_ramos} · Total real da campanha: {dado.total_real}
-        {dado.soma_ramos !== dado.total_real && (
-          <> · {dado.soma_ramos - dado.total_real} apoiador(es) compartilhado(s) entre ramos.</>
+        Soma dos ramos: {soma_ramos} · Total real da campanha: {total_real}
+        {soma_ramos !== total_real && (
+          <> · {soma_ramos - total_real} apoiador(es) compartilhado(s) entre ramos.</>
         )}
       </p>
     </section>
@@ -1273,32 +1302,15 @@ export function RankingTable() {
 Run: `cd web && npx vitest run app/dashboard/RankingTable.test.tsx`
 Expected: PASS — 4/4
 
-- [ ] **Step 5: Ligar no `DashboardClient`**
-
-```tsx
-// web/app/dashboard/DashboardClient.tsx
-'use client';
-import { NavShell } from '../components/NavShell';
-import { RankingTable } from './RankingTable';
-
-export function DashboardClient() {
-  return (
-    <NavShell>
-      <RankingTable />
-    </NavShell>
-  );
-}
-```
-
-- [ ] **Step 6: Rodar a suíte de `/dashboard` inteira e confirmar que passa**
+- [ ] **Step 5: Rodar a suíte de `/dashboard` inteira**
 
 Run: `cd web && npx vitest run app/dashboard`
 Expected: todos os arquivos passam.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add web/app/dashboard/RankingTable.tsx web/app/dashboard/RankingTable.test.tsx web/app/dashboard/DashboardClient.tsx
+git add web/app/dashboard/RankingTable.tsx web/app/dashboard/RankingTable.test.tsx
 git commit -m "feat(s5): RankingTable — ranking de lideranças com nota soma≠total"
 ```
 
@@ -1307,14 +1319,13 @@ git commit -m "feat(s5): RankingTable — ranking de lideranças com nota soma�
 ### Task 10: `EvolucaoChart` — gráfico de linha (Recharts)
 
 **Files:**
-- Create: `web/app/dashboard/EvolucaoChart.tsx`
+- Modify: `web/app/dashboard/EvolucaoChart.tsx` (substitui o stub da Task 8 — mesma assinatura, `DashboardClient.tsx` não muda)
 - Create: `web/app/dashboard/EvolucaoChart.test.tsx`
-- Modify: `web/app/dashboard/DashboardClient.tsx` (adiciona `<EvolucaoChart />` acima de `<RankingTable />`)
 - Modify: `web/package.json` (nova dep: `recharts`)
 
 **Interfaces:**
 - Consumes: `GET /api/dashboard/evolucao` (Task 6) via `fetch`.
-- Produces: componente `EvolucaoChart` (nenhum prop).
+- Produces: componente `EvolucaoChart` completo.
 
 - [ ] **Step 1: Instalar dependência**
 
@@ -1376,7 +1387,7 @@ describe('EvolucaoChart', () => {
 - [ ] **Step 3: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run app/dashboard/EvolucaoChart.test.tsx`
-Expected: FAIL — `Cannot find module './EvolucaoChart'`
+Expected: FAIL — stub atual não busca dado nem renderiza gráfico
 
 - [ ] **Step 4: Implementar o componente**
 
@@ -1440,34 +1451,15 @@ export function EvolucaoChart() {
 Run: `cd web && npx vitest run app/dashboard/EvolucaoChart.test.tsx`
 Expected: PASS — 3/3
 
-- [ ] **Step 6: Ligar no `DashboardClient`**
-
-```tsx
-// web/app/dashboard/DashboardClient.tsx
-'use client';
-import { NavShell } from '../components/NavShell';
-import { EvolucaoChart } from './EvolucaoChart';
-import { RankingTable } from './RankingTable';
-
-export function DashboardClient() {
-  return (
-    <NavShell>
-      <EvolucaoChart />
-      <RankingTable />
-    </NavShell>
-  );
-}
-```
-
-- [ ] **Step 7: Rodar a suíte de `/dashboard` inteira**
+- [ ] **Step 6: Rodar a suíte de `/dashboard` inteira**
 
 Run: `cd web && npx vitest run app/dashboard`
 Expected: todos os arquivos passam.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add web/app/dashboard/EvolucaoChart.tsx web/app/dashboard/EvolucaoChart.test.tsx web/app/dashboard/DashboardClient.tsx web/package.json web/package-lock.json
+git add web/app/dashboard/EvolucaoChart.tsx web/app/dashboard/EvolucaoChart.test.tsx web/package.json web/package-lock.json
 git commit -m "feat(s5): EvolucaoChart — linha de 90 dias com Recharts"
 ```
 
@@ -1476,13 +1468,12 @@ git commit -m "feat(s5): EvolucaoChart — linha de 90 dias com Recharts"
 ### Task 11: `AlertasList` — alertas de área e liderança estagnada
 
 **Files:**
-- Create: `web/app/dashboard/AlertasList.tsx`
+- Modify: `web/app/dashboard/AlertasList.tsx` (substitui o stub da Task 8 — mesma assinatura, `DashboardClient.tsx` não muda)
 - Create: `web/app/dashboard/AlertasList.test.tsx`
-- Modify: `web/app/dashboard/DashboardClient.tsx` (adiciona `<AlertasList />` no topo, antes de `<EvolucaoChart />`)
 
 **Interfaces:**
 - Consumes: `GET /api/dashboard/alertas` (Task 7) via `fetch`.
-- Produces: componente `AlertasList` (nenhum prop). Última peça do dashboard — após esta task, `DashboardClient` está completo (Alertas → Evolução → Ranking, decisão 8 do spec).
+- Produces: componente `AlertasList` completo. Última peça do dashboard — após esta task, `DashboardClient` (montado na Task 8) está com os 3 widgets reais.
 
 - [ ] **Step 1: Escrever o teste**
 
@@ -1528,7 +1519,7 @@ describe('AlertasList', () => {
 - [ ] **Step 2: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run app/dashboard/AlertasList.test.tsx`
-Expected: FAIL — `Cannot find module './AlertasList'`
+Expected: FAIL — stub atual não busca dado nem renderiza lista
 
 - [ ] **Step 3: Implementar o componente**
 
@@ -1596,38 +1587,17 @@ export function AlertasList() {
 Run: `cd web && npx vitest run app/dashboard/AlertasList.test.tsx`
 Expected: PASS — 3/3
 
-- [ ] **Step 5: Ligar no `DashboardClient` (ordem final: Alertas → Evolução → Ranking)**
-
-```tsx
-// web/app/dashboard/DashboardClient.tsx
-'use client';
-import { NavShell } from '../components/NavShell';
-import { AlertasList } from './AlertasList';
-import { EvolucaoChart } from './EvolucaoChart';
-import { RankingTable } from './RankingTable';
-
-export function DashboardClient() {
-  return (
-    <NavShell>
-      <AlertasList />
-      <EvolucaoChart />
-      <RankingTable />
-    </NavShell>
-  );
-}
-```
-
-- [ ] **Step 6: Rodar a suíte inteira do projeto**
+- [ ] **Step 5: Rodar a suíte inteira do projeto**
 
 Run: `cd web && npx vitest run`
 Expected: todos os arquivos passam, incluindo os pré-existentes de S0-S4.
 
-- [ ] **Step 7: Rodar `npx tsc --noEmit`, confirmar zero erros novos em `app/dashboard/`**
+- [ ] **Step 6: Rodar `npx tsc --noEmit`, confirmar zero erros novos em `app/dashboard/`**
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add web/app/dashboard/AlertasList.tsx web/app/dashboard/AlertasList.test.tsx web/app/dashboard/DashboardClient.tsx
+git add web/app/dashboard/AlertasList.tsx web/app/dashboard/AlertasList.test.tsx
 git commit -m "feat(s5): AlertasList — alerta de área e de liderança estagnada"
 ```
 
@@ -1662,13 +1632,13 @@ Anotar no relatório da task: o que foi visto (screenshot ou descrição), qualq
 
 ## Self-Review
 
-**1. Cobertura do spec:** decisão 1 (ranking = líderes por subárvore) → Task 1; decisão 2 (visibilidade líderes de topo vs subordinados diretos) → Task 1; decisão 3 (nota soma≠total) → Task 1 + Task 9; decisão 4 (ordenação) → Task 1 (`ORDER BY` dentro do `jsonb_agg`); decisão 5 (evolução acumulada, `CURRENT_DATE`) → Task 2; decisão 6 (alertas de área e liderança estagnada, regras fixas) → Task 3; decisão 7 (nav shell) → Task 4; decisão 8 (Recharts, layout empilhado) → Tasks 8-11; decisão 9 (3 RPCs independentes) → Tasks 1-3 + 5-7; decisão 10 (coleção vazia sem erro) → Tasks 1-3 (branches `IF v_campanha_id IS NULL`) + Tasks 9-11 (estados vazios na UI). Não-objetivos: nenhuma task adiciona motor de regra configurável, IA, snapshot, toggle de granularidade nos alertas, abas, logout, ou abrangência estadual — confirmado por omissão.
+**1. Cobertura do spec:** decisão 1 (ranking = líderes por subárvore) → Task 1; decisão 2 (visibilidade líderes de topo vs subordinados diretos) → Task 1; decisão 3 (nota soma≠total) → Task 1 + Task 9; decisão 4 (ordenação) → Task 1 (`ORDER BY` final); decisão 5 (evolução acumulada, `CURRENT_DATE`) → Task 2; decisão 6 (alertas de área e liderança estagnada, regras fixas) → Task 3; decisão 7 (nav shell) → Task 4; decisão 8 (Recharts, layout empilhado, ordem Alertas→Evolução→Ranking) → Task 8 (ordem fixada em `DashboardClient` desde o início) + Tasks 9-11 (conteúdo real); decisão 9 (3 RPCs independentes) → Tasks 1-3 + 5-7; decisão 10 (coleção vazia sem erro) → Tasks 1-3 (`RETURN`/cross-join vazio) + Tasks 9-11 (estados vazios na UI). Não-objetivos: nenhuma task adiciona motor de regra configurável, IA, snapshot, toggle de granularidade nos alertas, abas, logout, ou abrangência estadual — confirmado por omissão.
 
 **2. Placeholder scan:** nenhum "TBD"/"similar à Task N sem código". Toda task tem SQL/TS completo.
 
-**3. Consistência de tipos:** `RankingPayload` (Task 9) tem exatamente os campos de `ranking_liderancas` (Task 1) — `ramos: {pessoa_id, nome, subarvore_count}[]`, `soma_ramos`, `total_real`. `Ponto` (Task 10, `{dia, total}`) casa com `evolucao_pessoas` (Task 2, `TABLE(dia date, total integer)`). `Alerta` (Task 11, `{tipo, alvo_id, label, detalhe}`) casa com `dashboard_alertas` (Task 3). Rotas (Tasks 5-7) retornam o payload cru da RPC sem transformação, então os tipos client-side são idênticos aos server-side.
+**3. Consistência de tipos:** `RankingRow` (Task 9, `{pessoa_id, nome, subarvore_count, soma_ramos, total_real}`) casa exatamente com as colunas de `ranking_liderancas` (Task 1). `Ponto` (Task 10, `{dia, total}`) casa com `evolucao_pessoas` (Task 2). `Alerta` (Task 11, `{tipo, alvo_id, label, detalhe}`) casa com `dashboard_alertas` (Task 3). Rotas (Tasks 5-7) retornam o payload cru da RPC via `authenticatedRpc`, sem transformação — tipos client-side idênticos aos server-side em todos os 3 casos (nenhum caso especial de "objeto" vs "array": as 3 RPCs retornam `TABLE`, as 3 rotas retornam array).
 
-**Gap encontrado e corrigido durante o self-review:** a Task 3 originalmente não deixava claro como testar o escopo de "área" restrito a gestor/coordenador sem uma fixture extra cara (criar outro usuário liderança só pra confirmar ausência). Resolvido no Step 6 da Task 3: como a restrição é um branch condicional explícito no corpo da função (`IF v_papel IN ('gestor','coordenador')`), a verificação por leitura de código é suficiente — não precisa de fixture nova, evita duplicar custo de criação de usuário real só pra provar um `IF` que já é estruturalmente óbvio.
+**Mudanças feitas após revisão do usuário (antes de qualquer execução):** (1) `ranking_liderancas` mudou de `jsonb` único pra `TABLE` — consistente com as outras 2 RPCs, sem perda de informação (linha vazia = coleção vazia, decisão 10); (2) `dashboard_alertas` dividida em `dashboard_alertas_area`/`dashboard_alertas_lideranca` (internas) + `dashboard_alertas` (pública) — mesmo padrão de composição do `mapa_calor_agregado` (S4), cada regra agora testável/reusável isoladamente; (3) limiares de alerta (30 dias, 5%) viraram constantes nomeadas no corpo da função, não números soltos — YAGNI de configurabilidade mantido (decisão explícita do spec), só a leitura melhorou; (4) documentado explicitamente que a recursão sobre `vinculo` é seguramente livre de ciclo por causa do `trg_vinculo_ciclo_check` (S2) — não é uma omissão, é uma garantia já estabelecida; (5) `authenticatedRpc` extraído como helper compartilhado — as 3 rotas (Tasks 5-7) deixam de repetir `ssrClient`+`getUser`+`rpc`+erro; (6) `DashboardClient` + os 3 stubs de widget nascem juntos na Task 8, já na ordem final — Tasks 9-11 só substituem o corpo do próprio arquivo do widget, nunca mais tocam `DashboardClient.tsx`, reduzindo o número de tasks que mexem no mesmo arquivo (de 4 tasks — 8,9,10,11 — pra 1).
 
 ---
 
