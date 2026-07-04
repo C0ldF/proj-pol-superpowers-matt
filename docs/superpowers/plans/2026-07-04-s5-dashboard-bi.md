@@ -47,7 +47,7 @@ direto nas migrations antes de escrever este plano:
 
 **Interfaces:**
 - Consumes: `public.subarvore_count(uuid)`, `public.usuario_campanha`, `public.vinculo`, `public.pessoa` (existentes).
-- Produces: `public.ranking_liderancas() RETURNS TABLE(pessoa_id uuid, nome text, subarvore_count integer, soma_ramos integer, total_real integer)`. **Uma linha por líder do ranking**, ordenado (`subarvore_count DESC, nome ASC`); `soma_ramos`/`total_real` vêm repetidos (mesmo valor) em toda linha — resumo do conjunto inteiro, não específico de cada líder. **Tabela vazia (0 linhas)** quando não há líder no escopo do actor — o cliente trata isso como "nenhum líder ainda" e assume `soma_ramos=0`/`total_real=0`. Task 5 (rota Next.js) chama via `supabase.rpc('ranking_liderancas')`.
+- Produces: `public.ranking_liderancas() RETURNS TABLE(pessoa_id uuid, nome text, subarvore_count integer, soma_ramos integer, total_real integer)`. **Uma linha por líder do ranking**, ordenado (`subarvore_count DESC, nome ASC`); `soma_ramos`/`total_real` vêm repetidos (mesmo valor) em toda linha — resumo do conjunto inteiro, não específico de cada líder. **Tabela vazia (0 linhas)** quando não há líder no escopo do actor. **Importante pro consumidor (Task 9):** a UI nunca lê `soma_ramos`/`total_real` de um array vazio — o componente checa `linhas.length === 0` e mostra o estado vazio ("nenhum líder ainda") ANTES de desestruturar qualquer campo, então não existe uma convenção implícita de "0 linhas ⇒ soma_ramos=0" no cliente: o cliente simplesmente não olha pra esses campos nesse caso. Task 5 (rota Next.js) chama via `supabase.rpc('ranking_liderancas')`.
 
 - [ ] **Step 1: Escrever a migration**
 
@@ -471,21 +471,36 @@ BEGIN
   -- Recursão sobre vinculo é segura contra ciclo: trg_vinculo_ciclo_check
   -- (S2, migration 0017) bloqueia no INSERT qualquer vínculo que criaria um
   -- ciclo — mesma garantia já usada sem checagem própria em subarvore_count.
+  --
+  -- Visibilidade e "lider_desde" são calculados em 2 passos separados, não
+  -- num só DISTINCT ON: uma pessoa pode ter MAIS DE UM vínculo como
+  -- pessoa_id (ADR 0004 — "mesma pessoa comanda um ramo e é base em
+  -- outro"), ex. Líder X reporta a CoordA (vínculo de dia 1) e TAMBÉM
+  -- reporta à Liderança atual (vínculo de dia 10). Um DISTINCT ON
+  -- (pessoa_id) ORDER BY criado_em ASC ficaria só com o vínculo do dia 1
+  -- (sob CoordA) e o teste `v.responsavel_id = v_pessoa_id` nunca veria a
+  -- relação com a Liderança atual — ela deixaria de ver um subordinado
+  -- direto de verdade. Por isso a visibilidade usa EXISTS sobre TODOS os
+  -- vínculos do candidato, não só o mais antigo.
   RETURN QUERY
-  WITH lideres AS (
-    SELECT DISTINCT ON (v.pessoa_id) v.pessoa_id, v.criado_em AS lider_desde
-      FROM public.vinculo v
-     WHERE v.campanha_id = v_campanha_id
-       AND v.pessoa_id IN (
-         SELECT DISTINCT responsavel_id FROM public.vinculo
-          WHERE campanha_id = v_campanha_id AND responsavel_id IS NOT NULL
-       )
-       AND (
-         v_papel IN ('gestor', 'coordenador')
-         OR v.pessoa_id = v_pessoa_id
-         OR v.responsavel_id = v_pessoa_id
-       )
-     ORDER BY v.pessoa_id, v.criado_em ASC
+  WITH candidatos AS (
+    SELECT DISTINCT responsavel_id AS pessoa_id
+      FROM public.vinculo
+     WHERE campanha_id = v_campanha_id AND responsavel_id IS NOT NULL
+  ),
+  lideres AS (
+    SELECT c.pessoa_id,
+      (SELECT min(v.criado_em) FROM public.vinculo v
+        WHERE v.pessoa_id = c.pessoa_id AND v.campanha_id = v_campanha_id) AS lider_desde
+      FROM candidatos c
+     WHERE v_papel IN ('gestor', 'coordenador')
+        OR c.pessoa_id = v_pessoa_id
+        OR EXISTS (
+             SELECT 1 FROM public.vinculo v
+              WHERE v.pessoa_id = c.pessoa_id
+                AND v.responsavel_id = v_pessoa_id
+                AND v.campanha_id = v_campanha_id
+           )
   )
   SELECT l.pessoa_id::text, p.nome,
     jsonb_build_object('lider_desde', l.lider_desde)
@@ -558,6 +573,13 @@ const { data: gestorUser } = await admin.auth.admin.createUser({
 });
 console.log('gestor_user_id=', gestorUser.user.id);
 
+// Segundo usuário real: liderança que vai testar o caso de vínculo
+// múltiplo (ADR 0004) — ver bloco liderDual abaixo.
+const { data: liderAtualUser } = await admin.auth.admin.createUser({
+  email: 's5-fixture-lideratual@teste.local', password: 'SenhaForte!S5e', email_confirm: true,
+});
+console.log('lider_atual_user_id=', liderAtualUser.user.id);
+
 const { data: camp } = await admin.from('campanha').insert({
   subdominio: 's5-fixture-alertas', nome: 'S5 Fixture Alertas', cargo: 'prefeito',
   abrangencia: 'municipal', municipio_id: 2211001, data_eleicao: '2028-10-01',
@@ -581,7 +603,25 @@ const liderAtivo = await criarPessoa('Lider Ativo'); // 35 dias, apoiador novo h
 const apoiadorNovo = await criarPessoa('Apoiador Novo do Ativo');
 const liderRecente = await criarPessoa('Lider Recente'); // só 10 dias de tenure — não deve alertar
 
-console.log({ gestorUserId: gestorUser.user.id, liderEstagnado, apoiadorAntigo, liderAtivo, apoiadorNovo, liderRecente });
+// Caso de vínculo múltiplo (ADR 0004): LiderDual reporta a CoordVelho (vínculo
+// antigo, criado primeiro) E TAMBÉM à LiderAtual (vínculo mais recente,
+// criado depois). Testa que a visibilidade de dashboard_alertas_lideranca
+// enxerga LiderDual como subordinada direta de LiderAtual mesmo o vínculo
+// COM ELA não sendo o mais antigo de LiderDual.
+const coordVelho = await criarPessoa('Coord Velho');
+const liderDual = await criarPessoa('Lider Dual');
+const apoiadorDoDual = await criarPessoa('Apoiador Do Dual'); // criado há 40 dias — dá tenure/estagnação a LiderDual
+const liderAtualPessoa = await criarPessoa('Lider Atual');
+
+console.log({
+  gestorUserId: gestorUser.user.id, liderEstagnado, apoiadorAntigo, liderAtivo, apoiadorNovo, liderRecente,
+  liderAtualUserId: liderAtualUser.user.id, coordVelho, liderDual, apoiadorDoDual, liderAtualPessoa,
+});
+
+await admin.from('usuario_campanha').insert({
+  user_id: liderAtualUser.user.id, campanha_id: camp.id, papel: 'lideranca',
+  pessoa_id: liderAtualPessoa, cpf_hmac: 'fixture-s5-lideratual',
+});
 
 await admin.from('vinculo').insert([
   { campanha_id: camp.id, pessoa_id: liderEstagnado, responsavel_id: null, papel: 'lideranca' },
@@ -589,6 +629,10 @@ await admin.from('vinculo').insert([
   { campanha_id: camp.id, pessoa_id: liderAtivo, responsavel_id: null, papel: 'lideranca' },
   { campanha_id: camp.id, pessoa_id: apoiadorNovo, responsavel_id: liderAtivo, papel: 'apoiador' },
   { campanha_id: camp.id, pessoa_id: liderRecente, responsavel_id: null, papel: 'lideranca' },
+  { campanha_id: camp.id, pessoa_id: coordVelho, responsavel_id: null, papel: 'coordenador' },
+  { campanha_id: camp.id, pessoa_id: liderDual, responsavel_id: coordVelho, papel: 'lideranca' },
+  { campanha_id: camp.id, pessoa_id: apoiadorDoDual, responsavel_id: liderDual, papel: 'apoiador' },
+  { campanha_id: camp.id, pessoa_id: liderDual, responsavel_id: liderAtualPessoa, papel: 'lideranca' },
 ]);
 
 console.log('fixture pronta — próximo passo: backdatar via execute_sql (Step 4).');
@@ -619,6 +663,26 @@ SELECT alvo_id, label FROM public.dashboard_alertas_lideranca('<gestor_user_id>'
 -- esperado: exatamente 1 linha — alvo_id = <liderEstagnado>, label = 'Lider Estagnado'.
 -- Lider Ativo não aparece (teve inserção recente). Lider Recente não aparece
 -- (tenure < 30 dias).
+
+-- Caso de vínculo múltiplo (ADR 0004): o vínculo de LiderDual sob CoordVelho
+-- é o MAIS ANTIGO (50 dias) — se a visibilidade só olhasse pra esse (bug do
+-- DISTINCT ON original), LiderAtual jamais veria LiderDual como subordinada.
+-- O vínculo sob LiderAtual é mais recente (5 dias) — só existe porque a
+-- correção passou a checar TODOS os vínculos do candidato, não só o mais
+-- antigo.
+UPDATE public.vinculo SET criado_em = now() - interval '50 days'
+ WHERE pessoa_id = '<liderDual>' AND responsavel_id = '<coordVelho>';
+UPDATE public.vinculo SET criado_em = now() - interval '5 days'
+ WHERE pessoa_id = '<liderDual>' AND responsavel_id = '<liderAtualPessoa>';
+UPDATE public.pessoa SET criado_em = CURRENT_DATE - 40 WHERE id = '<apoiadorDoDual>';
+
+SELECT alvo_id, label FROM public.dashboard_alertas_lideranca('<lider_atual_user_id>');
+-- esperado: exatamente 1 linha — alvo_id = <liderDual>, label = 'Lider Dual'.
+-- Prova que a EXISTS sobre todos os vínculos de LiderDual (não só o mais
+-- antigo, sob CoordVelho) encontrou a relação com LiderAtual. lider_desde
+-- usado no filtro de tenure é o MIN entre os 2 vínculos de LiderDual (o de
+-- 50 dias sob CoordVelho) — por isso ela passa no limiar de 30 dias mesmo
+-- a relação com LiderAtual sendo recente.
 ```
 
 - [ ] **Step 5: Verificar alerta de área contra o lote real de Teresina (municipio_id=2211001, já publicado no S4) e a função pública completa**
@@ -657,6 +721,7 @@ DELETE FROM public.campanha WHERE id = '<campanha_id>';
 
 ```javascript
 await admin.auth.admin.deleteUser('<gestor_user_id>');
+await admin.auth.admin.deleteUser('<lider_atual_user_id>');
 ```
 
 - [ ] **Step 7: `get_advisors(type=security)`**
@@ -832,7 +897,10 @@ import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { ssrClient } from './ssr';
 
-export async function authenticatedRpc(rpcName: string) {
+// Generic opcional: authenticatedRpc<RankingRow[]>('ranking_liderancas')
+// documenta no call site o shape esperado, sem mudar o comportamento em
+// runtime (o dado ainda vem cru do Postgres via supabase-js, sem validação).
+export async function authenticatedRpc<T = unknown>(rpcName: string) {
   const cookieStore = await cookies();
   const supabase = ssrClient(cookieStore);
   const { data: { user } } = await supabase.auth.getUser();
@@ -840,7 +908,7 @@ export async function authenticatedRpc(rpcName: string) {
 
   const { data, error } = await supabase.rpc(rpcName);
   if (error) return NextResponse.json({ erro: error.message }, { status: 500 });
-  return NextResponse.json(data);
+  return NextResponse.json(data as T);
 }
 ```
 
@@ -1639,6 +1707,8 @@ Anotar no relatório da task: o que foi visto (screenshot ou descrição), qualq
 **3. Consistência de tipos:** `RankingRow` (Task 9, `{pessoa_id, nome, subarvore_count, soma_ramos, total_real}`) casa exatamente com as colunas de `ranking_liderancas` (Task 1). `Ponto` (Task 10, `{dia, total}`) casa com `evolucao_pessoas` (Task 2). `Alerta` (Task 11, `{tipo, alvo_id, label, detalhe}`) casa com `dashboard_alertas` (Task 3). Rotas (Tasks 5-7) retornam o payload cru da RPC via `authenticatedRpc`, sem transformação — tipos client-side idênticos aos server-side em todos os 3 casos (nenhum caso especial de "objeto" vs "array": as 3 RPCs retornam `TABLE`, as 3 rotas retornam array).
 
 **Mudanças feitas após revisão do usuário (antes de qualquer execução):** (1) `ranking_liderancas` mudou de `jsonb` único pra `TABLE` — consistente com as outras 2 RPCs, sem perda de informação (linha vazia = coleção vazia, decisão 10); (2) `dashboard_alertas` dividida em `dashboard_alertas_area`/`dashboard_alertas_lideranca` (internas) + `dashboard_alertas` (pública) — mesmo padrão de composição do `mapa_calor_agregado` (S4), cada regra agora testável/reusável isoladamente; (3) limiares de alerta (30 dias, 5%) viraram constantes nomeadas no corpo da função, não números soltos — YAGNI de configurabilidade mantido (decisão explícita do spec), só a leitura melhorou; (4) documentado explicitamente que a recursão sobre `vinculo` é seguramente livre de ciclo por causa do `trg_vinculo_ciclo_check` (S2) — não é uma omissão, é uma garantia já estabelecida; (5) `authenticatedRpc` extraído como helper compartilhado — as 3 rotas (Tasks 5-7) deixam de repetir `ssrClient`+`getUser`+`rpc`+erro; (6) `DashboardClient` + os 3 stubs de widget nascem juntos na Task 8, já na ordem final — Tasks 9-11 só substituem o corpo do próprio arquivo do widget, nunca mais tocam `DashboardClient.tsx`, reduzindo o número de tasks que mexem no mesmo arquivo (de 4 tasks — 8,9,10,11 — pra 1).
+
+**Segunda rodada de revisão do usuário — bug real encontrado e corrigido:** `dashboard_alertas_lideranca` (Task 3) usava `DISTINCT ON (v.pessoa_id) ... ORDER BY criado_em ASC` pra decidir tanto `lider_desde` quanto a checagem de visibilidade (`v.responsavel_id = v_pessoa_id`) — mas uma pessoa pode ter mais de um vínculo como `pessoa_id` (ADR 0004, ex. líder que reporta a 2 responsáveis em ramos diferentes). Se o vínculo escolhido pelo `DISTINCT ON` (o mais antigo) não fosse o que liga o candidato ao actor atual, a checagem de visibilidade falhava mesmo quando o candidato ERA subordinado direto real do actor por outro vínculo. Corrigido: visibilidade agora usa `EXISTS` sobre **todos** os vínculos do candidato (não só o mais antigo); `lider_desde` continua sendo o `MIN(criado_em)` entre todos eles. Fixture da Task 3 ganhou um caso dedicado (`liderDual`/`liderAtualPessoa`/`coordVelho`, 2º usuário real `liderAtualUser`) que reproduz exatamente esse cenário e falharia com o código antigo. Também: nota explícita em `RankingTable` (Task 9) de que o estado vazio é checado ANTES de ler `soma_ramos`/`total_real` — não existe uma convenção implícita de "0 linhas ⇒ 0" no cliente, o cliente só não olha pra esses campos nesse caso; `authenticatedRpc` ganhou um parâmetro de tipo genérico opcional (`<T = unknown>`) pra melhorar inferência em call sites futuros, sem mudar comportamento em runtime.
 
 ---
 
