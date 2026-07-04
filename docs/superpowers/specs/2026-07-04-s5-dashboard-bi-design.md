@@ -16,8 +16,9 @@ stack nesta fatia, mesmo padrão do S4 (SQL + rota Next.js + página real).
 ## Decisões desta fatia
 
 1. **Ranking = líderes por tamanho de sub-árvore, não áreas geográficas.**
-   Sujeito do ranking = toda `pessoa` que é `responsavel_id` em pelo menos 1
-   `vinculo` (isto é, tem subordinados diretos). Métrica = reusa
+   Sujeito do ranking = toda `pessoa` que aparece como `responsavel_id` de
+   pelo menos um `vinculo` (isto é, tem subordinados diretos — o campo
+   `responsavel_id` pertence ao vínculo, não à pessoa). Métrica = reusa
    `subarvore_count(vinculo_id)` já existente (S2, migration 0016) —
    contagem recursiva de descendentes, qualquer `papel_vinculo`, sem
    recontar o próprio líder.
@@ -26,7 +27,7 @@ stack nesta fatia, mesmo padrão do S4 (SQL + rota Next.js + página real).
    cujo `responsavel_id IS NULL`** (o "líder de topo" é um conceito do
    vínculo, não da pessoa: a mesma pessoa pode ter outro vínculo em que
    *não* é topo). Liderança vê só o ranking dos seus subordinados diretos
-   (vínculos onde `responsavel_id` = pessoa dela).
+   (vínculos cujo `responsavel_id` referencia a pessoa do actor).
 3. **Nota "soma dos ramos ≠ total" (ADR 0003).** Para o conjunto de ramos
    exibido (líderes de topo, no caso gestor/coordenador; subordinados
    diretos, no caso liderança): `soma_ramos` = soma de `subarvore_count` de
@@ -41,21 +42,29 @@ stack nesta fatia, mesmo padrão do S4 (SQL + rota Next.js + página real).
    (`deleted_at`) — não é só contagem de inserções. Derivado direto de
    `pessoa.criado_em`/`deleted_at`, sem tabela de snapshot (mesmo padrão
    "sem cache" do S4: contagem-no-tempo-T = `criado_em <= T AND
-   (deleted_at IS NULL OR deleted_at > T)`). Bucket diário (90 pontos,
-   últimos 90 dias). Escopo de visibilidade igual ao ranking (sub-árvore
-   pra liderança, campanha inteira pra gestor/coordenador).
+   (deleted_at IS NULL OR deleted_at > T)`). Bucket diário, 90 pontos —
+   últimos 90 dias **incluindo o dia atual** (hoje + 89 dias anteriores).
+   Escopo de visibilidade igual ao ranking (sub-árvore pra liderança,
+   campanha inteira pra gestor/coordenador). **Referência temporal =
+   `CURRENT_DATE`, nunca `now()`** — garante que a curva não muda conforme
+   o horário do dia em que a query roda (resultado determinístico durante
+   todo o dia).
 6. **Alertas — regras fixas, sem motor configurável (YAGNI: sem tabela de
    regra/limiar por campanha):**
    - **Área**: reusa `mapa_calor_agregado('zona')` (só granularidade zona
      no MVP — toggle bairro nos alertas é não-objetivo). Alerta quando
-     `potencial da área > média simples de potencial de todas as zonas da
-     campanha` **E** `penetracao < 0.05` (área com potencial acima da
-     média mas baixíssima conversão em apoiador).
+     `potencial da área > média simples de potencial` **E**
+     `penetracao < 0.05` (área com potencial acima da média mas
+     baixíssima conversão em apoiador). A média é calculada sobre
+     **todas** as zonas retornadas por `mapa_calor_agregado('zona')` —
+     nenhuma zona é excluída do cálculo por ter potencial baixo (a própria
+     função já não retorna zona sem nenhum local elegível ao calor, então
+     não há caso de potencial zero a decidir incluir ou excluir).
    - **Liderança estagnada**: líder com tenure ≥ 30 dias (desde
      `criado_em` do próprio vínculo, isto é, desde que virou líder) **e**
-     nenhuma inserção de pessoa na sub-árvore (`criado_em` de qualquer
-     descendente) nos últimos 30 dias. Tenure mínimo evita falso-positivo
-     em líder recém-criado.
+     nenhuma inserção de pessoa na sub-árvore **em qualquer profundidade**
+     (`criado_em` de qualquer descendente, direto ou indireto) nos últimos
+     30 dias. Tenure mínimo evita falso-positivo em líder recém-criado.
    - Visibilidade: mesma regra do ranking — gestor/coordenador veem todos
      os alertas (área + liderança-estagnada, campanha inteira); liderança
      vê só o alerta de estagnação sobre si mesma e sobre sub-líderes
@@ -93,7 +102,9 @@ stack nesta fatia, mesmo padrão do S4 (SQL + rota Next.js + página real).
 
 ## Schema / Funções
 
-Nenhuma tabela nova. Reusa `subarvore_count`, `pessoa_em_subarvore_do_actor`
+Nenhuma tabela, view materializada ou índice dedicado novo — índices de
+apoio, se a implementação achar necessário, ficam a critério do plano.
+Reusa `subarvore_count`, `pessoa_em_subarvore_do_actor`
 e `mapa_calor_agregado` já existentes. Três funções novas, mesmo padrão
 `SECURITY DEFINER SET search_path = ''` + `GRANT` só pra `authenticated`
 lendo `auth.uid()` internamente (S4, decisão 11):
@@ -108,9 +119,10 @@ lendo `auth.uid()` internamente (S4, decisão 11):
 - `evolucao_pessoas()` → `TABLE(dia date, total integer)`, 90 linhas
   (`generate_series` dos últimos 90 dias), escopo por sub-árvore/campanha
   igual ao ranking.
-- `dashboard_alertas()` → `TABLE(tipo text, area_ou_pessoa_id text, label
-  text, detalhe jsonb)` — une as 2 regras num só retorno, `tipo` diferencia
-  `'area'` de `'lideranca_estagnada'`.
+- `dashboard_alertas()` → `TABLE(tipo text, alvo_id text, label text,
+  detalhe jsonb)` — une as 2 regras num só retorno, `tipo` diferencia
+  `'area'` de `'lideranca_estagnada'`; `alvo_id` é o `area_id` (regra de
+  área) ou `pessoa_id` (regra de liderança estagnada) conforme `tipo`.
 
 Detalhamento exato de SQL (índices necessários, corpo de cada função) fica
 pro plano de implementação — este spec fixa contrato e regra de negócio,
@@ -123,7 +135,9 @@ não o SQL literal.
 - `GET /api/dashboard/alertas`
 
 Mesmo padrão do `/api/mapa-calor`: `ssrClient(cookieStore)`, 401 sem
-sessão, chama a RPC correspondente, retorna o array.
+sessão, chama a RPC correspondente, retorna exatamente o payload que ela
+produz — `/ranking` é um objeto (`{ramos, soma_ramos, total_real}`),
+`/evolucao` e `/alertas` são arrays.
 
 Página `/dashboard`: server component + checagem de sessão via `ssrClient`,
 **sem redirect** (mesmo padrão de `/mapa-calor` — app ainda não tem página
@@ -153,15 +167,16 @@ linha, 90 pontos), `AlertasList`. Novo `NavShell` compartilhado entre
    mesmo sem inserção (falso-positivo evitado).
 8. Isolamento entre campanhas: nenhuma das 3 RPCs vaza dado de outra
    campanha.
-9. Spoofing bloqueado: as 3 assinaturas não recebem `actor_uid` —
-   confirmar lendo a assinatura aplicada, mesmo padrão do S4 (teste 14
-   daquela fatia).
+9. Spoofing bloqueado: confirmar que as 3 funções aceitam zero parâmetros
+   de identidade (assinatura sem `actor_uid`/`uuid` de usuário) e resolvem
+   o actor exclusivamente via `auth.uid()` interno — mesmo padrão do S4
+   (teste 14 daquela fatia).
 10. Coleção vazia sem erro: campanha nova sem líder/pessoa/alerta — as 3
     RPCs retornam vazio, não lançam exceção.
 
 ### Camada Next.js
 
 11. 401 sem sessão nas 3 rotas.
-12. 200 com dado real (sessão de gestor de campanha com dado real).
+12. 200 com payload válido (sessão de gestor de campanha com dado real).
 13. Página `/dashboard` sem sessão não lança erro (mesmo padrão sem
     redirect do `/mapa-calor`).
