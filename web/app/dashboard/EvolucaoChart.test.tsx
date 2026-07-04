@@ -26,6 +26,7 @@ describe('EvolucaoChart', () => {
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith('/api/dashboard/evolucao');
     });
+    expect(screen.getByText('Evolução (90 dias)')).toBeInTheDocument();
   });
 
   it('mostra estado vazio quando a série é toda zero', async () => {
