@@ -93,6 +93,13 @@ BEGIN
      ORDER BY v.pessoa_id, v.criado_em ASC
   ),
   ramos AS (
+    -- Nota de performance: subarvore_count roda uma recursão própria POR
+    -- ramo (não uma recursão só compartilhada entre todos) — mesmo
+    -- trade-off já aceito em forca_por_area (S4) e evolucao_pessoas (Task
+    -- 2) na escala MVP. Com centenas/milhares de líderes de topo, isso vira
+    -- candidato natural de otimização (ex.: uma única passada recursiva
+    -- calculando o tamanho de sub-árvore de todo mundo de uma vez, em vez
+    -- de N chamadas independentes) — fora de escopo aqui.
     SELECT r.pessoa_id, p.nome, public.subarvore_count(r.vinculo_id) AS subarvore_count
       FROM ramos_raw r
       JOIN public.pessoa p ON p.id = r.pessoa_id
