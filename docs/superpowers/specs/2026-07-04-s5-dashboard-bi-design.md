@@ -16,8 +16,8 @@ stack nesta fatia, mesmo padrão do S4 (SQL + rota Next.js + página real).
 ## Decisões desta fatia
 
 1. **Ranking = líderes por tamanho de sub-árvore, não áreas geográficas.**
-   Sujeito do ranking = toda `pessoa` que aparece como `responsavel_id` de
-   pelo menos um `vinculo` (isto é, tem subordinados diretos — o campo
+   Sujeito do ranking = toda `pessoa` referenciada como `responsavel_id`
+   por pelo menos um `vinculo` (isto é, tem subordinados diretos — o campo
    `responsavel_id` pertence ao vínculo, não à pessoa). Métrica = reusa
    `subarvore_count(vinculo_id)` já existente (S2, migration 0016) —
    contagem recursiva de descendentes, qualquer `papel_vinculo`, sem
@@ -41,8 +41,14 @@ stack nesta fatia, mesmo padrão do S4 (SQL + rota Next.js + página real).
    do tempo**, considerando tanto inserções (`criado_em`) quanto remoções
    (`deleted_at`) — não é só contagem de inserções. Derivado direto de
    `pessoa.criado_em`/`deleted_at`, sem tabela de snapshot (mesmo padrão
-   "sem cache" do S4: contagem-no-tempo-T = `criado_em <= T AND
-   (deleted_at IS NULL OR deleted_at > T)`). Bucket diário, 90 pontos —
+   "sem cache" do S4), expressão:
+
+   ```
+   total(T) = count(pessoa) WHERE criado_em <= T
+                              AND (deleted_at IS NULL OR deleted_at > T)
+   ```
+
+   Bucket diário, 90 pontos —
    últimos 90 dias **incluindo o dia atual** (hoje + 89 dias anteriores).
    Escopo de visibilidade igual ao ranking (sub-árvore pra liderança,
    campanha inteira pra gestor/coordenador). **Referência temporal =
@@ -115,7 +121,9 @@ lendo `auth.uid()` internamente (S4, decisão 11):
   (soma_ramos/total_real) é um resumo do conjunto inteiro, não uma coluna
   por linha; resolve escopo (líderes de topo vs subordinados diretos) a
   partir de `usuario_campanha.papel` do actor, igual ao padrão de
-  `forca_por_area`.
+  `forca_por_area`. **`ramos` já vem ordenado pela função** conforme a
+  decisão 4 (`subarvore_count DESC`, empate por nome `ASC`) — a API e o
+  React só exibem, nunca reordenam.
 - `evolucao_pessoas()` → `TABLE(dia date, total integer)`, 90 linhas
   (`generate_series` dos últimos 90 dias), escopo por sub-árvore/campanha
   igual ao ranking.
@@ -177,6 +185,6 @@ linha, 90 pontos), `AlertasList`. Novo `NavShell` compartilhado entre
 ### Camada Next.js
 
 11. 401 sem sessão nas 3 rotas.
-12. 200 com payload válido (sessão de gestor de campanha com dado real).
+12. 200 com payload válido (sessão válida de gestor de campanha).
 13. Página `/dashboard` sem sessão não lança erro (mesmo padrão sem
     redirect do `/mapa-calor`).
