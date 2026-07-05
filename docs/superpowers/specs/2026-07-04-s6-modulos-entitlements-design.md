@@ -154,11 +154,12 @@ Postgres bloqueia a linha durante o `UPDATE`, então chamadas concorrentes
 serializam em vez de perder uma escrita). `REVOKE ALL` de `authenticated`
 inclusive — essas funções destinam-se exclusivamente ao uso pelo backend
 autenticado com `service_role` (chave privilegiada, própria pra scripts
-administrativos), não sendo expostas a clientes autenticados. A ordem dos elementos no array não é
-significativa (não há nenhuma leitura que dependa de ordem) — `habilitar`
-concatena no fim, `desabilitar` reconstrói via `jsonb_agg` filtrando o
-elemento removido, sem se preocupar em preservar posição relativa dos
-demais.
+administrativos), não sendo expostas a clientes autenticados.
+`modulos_habilitados` é tratado como **conjunto** de strings, não lista
+ordenada — a ordem dos elementos no array não é significativa (nenhuma
+leitura depende de ordem) — `habilitar` concatena no fim, `desabilitar`
+reconstrói via `jsonb_agg` filtrando o elemento removido, sem se preocupar
+em preservar posição relativa dos demais.
 
 ```sql
 CREATE OR REPLACE FUNCTION public.habilitar_modulo(
