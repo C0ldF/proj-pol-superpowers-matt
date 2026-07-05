@@ -20,8 +20,10 @@ ligar/desligar módulo (S6) por campanha. Sem CRUD de campanha — continua manu
    REFERENCES auth.users(id))`.** Mesmo padrão de `usuario_campanha`
    (`0006_papel_login_usuario_campanha.sql`): RLS ligado sem policy pra
    `authenticated`/`anon` (deny total), só `service_role` e
-   `supabase_auth_admin` (pro hook) leem. Sem coluna extra — só a associação
-   "esse `auth.users` é superadmin". Não cabe em `usuario_campanha`
+   `supabase_auth_admin` (pro hook) leem. Sem colunas funcionais além do
+   vínculo com `auth.users` — só `criado_em` pra auditoria operacional (ex.:
+   "desde quando essa pessoa é superadmin"), nenhum outro dado. Não cabe em
+   `usuario_campanha`
    (`campanha_id NOT NULL`) nem em `papel_login` (que é escopado por
    campanha) — Superadmin é "fora da campanha" por definição (ADR 0004,
    escada de papéis), precisa de uma tabela própria sem `campanha_id`.
@@ -42,7 +44,30 @@ ligar/desligar módulo (S6) por campanha. Sem CRUD de campanha — continua manu
    parâmetro de identidade. Corpo: `EXISTS(SELECT 1 FROM public.superadmin
    WHERE user_id = auth.uid())`. `REVOKE ALL FROM public, anon` + `GRANT
    EXECUTE TO authenticated` (mesma exceção de sempre: só ela precisa ser
-   chamável pelo próprio usuário logado via `ssrClient`).
+   chamável pelo próprio usuário logado via `ssrClient`). **`SECURITY
+   DEFINER` aqui não é só convenção — é necessário.** `superadmin` (decisão
+   1) tem RLS deny-total pra `authenticated`; se a função fosse `SECURITY
+   INVOKER`, ela rodaria com o papel de quem chamou (`authenticated`), a RLS
+   filtraria toda linha da tabela pro `SELECT` interno, e a função sempre
+   retornaria `false` — inclusive pro superadmin real. `SECURITY DEFINER`
+   eleva o papel efetivo pra dentro da execução (papel do dono da função),
+   igual a toda outra função desta família que lê tabela com RLS restritiva.
+
+   **JWT autentica o login; o banco autoriza cada ação — duas fontes, dois
+   papéis, de propósito.** O claim `app_metadata.superadmin` (decisão 2) só
+   é conferido **no momento do login** (`getClaims()` logo após
+   `signInWithPassword`, decisão 5) — ele não é consultado de novo depois
+   disso. Toda rota/página protegida do painel (`requireSuperadmin()`,
+   decisão 7, e a própria página do dashboard) chama `actor_e_superadmin()`
+   a cada request, lendo a tabela `superadmin` **ao vivo**, nunca o JWT.
+   Consequência prática: remover a linha de alguém em `superadmin` revoga a
+   capacidade de fazer qualquer ação administrativa **imediatamente**, no
+   próximo request — independente de o JWT em circulação ainda carregar
+   `superadmin=true` (o JWT só volta a refletir a realidade depois de
+   expirar/renovar, mas isso não importa, porque nenhuma rota confia nele
+   pra autorizar, só pra saber quem está logado no momento do login). JWT =
+   "quem é" (autenticação inicial); banco via `actor_e_superadmin()` =
+   "pode fazer o quê agora" (autorização contínua, autoridade final).
 4. **Rota do painel: `/superadmin/*` no domínio raiz, sem subdomínio.**
    `web/middleware.ts` hoje já deixa passar livre quando não há subdomínio
    (`if (!subdominio) { ...; return NextResponse.next(...) }`) — nenhuma
@@ -190,6 +215,19 @@ o bloco `eh_superadmin` é novo, independente (nenhuma condição cruzada entre
 os dois). `LANGUAGE plpgsql` (era implicitamente permitido antes — a versão
 original também é `plpgsql`), sem mudança de linguagem.
 
+**Sem necessidade de "limpar" claim antigo antes de preencher.** `claims :=
+event->'claims'` no início da função não é o JWT anterior do usuário — é a
+baseline que o próprio Supabase Auth calcula na hora de emitir CADA token
+novo (login ou refresh), antes de invocar o hook. Cada invocação começa de
+uma base fresca; o hook só ADICIONA campos condicionalmente, nunca carrega
+um `superadmin=true` de uma execução anterior. Se alguém deixa de ser
+superadmin, o próximo token emitido pra essa pessoa (próximo login ou
+refresh) simplesmente não passa pelo `IF eh_superadmin THEN` — o claim não
+aparece, sem precisar de remoção explícita. Um JWT **já emitido antes** da
+remoção continua com o claim antigo até expirar/renovar — mas isso é
+exatamente o cenário que a decisão 3 acima já cobre (o banco, não o JWT, é
+quem autoriza cada ação).
+
 ## Camada Next.js
 
 ### Login
@@ -275,7 +313,27 @@ requireSuperadmin(): Promise<NextResponse | null>
 páginas anteriores — mostra mensagem simples se bloqueado), renderiza
 `DashboardSuperadminClient` (client component: busca
 `/api/superadmin/campanhas`, lista campanhas com checkbox por módulo,
-`onChange` chama `POST /api/superadmin/modulos`).
+`onChange` chama `POST /api/superadmin/modulos`; um botão "Sair" chama
+`POST /api/superadmin/logout` e redireciona pra `/superadmin/login`).
+
+**Toggle é pessimista, não otimista.** O checkbox só reflete o novo estado
+depois da resposta `200` de `POST /api/superadmin/modulos` — fica
+desabilitado/"carregando" entre o clique e a resposta, e volta ao estado
+anterior se a chamada falhar. Mais simples de implementar corretamente que
+otimista (sem precisar reverter um estado já mostrado em caso de erro), e a
+frequência de uso (ligar/desligar módulo é raro, não é uma interação de
+alta cadência) não justifica a complexidade extra de um toggle otimista.
+
+`POST /api/superadmin/logout` (`web/app/api/superadmin/logout/route.ts`):
+
+```
+1. ssrClient(cookies()).auth.signOut()
+2. retorna 200 {ok: true}
+```
+
+Sem checagem de `requireSuperadmin()` aqui — encerrar a própria sessão deve
+funcionar mesmo que o claim/registro de superadmin já tenha sido revogado
+(a pessoa ainda quer conseguir sair).
 
 ## Scripts CLI
 
@@ -286,11 +344,20 @@ mesmo padrão orquestrador puro + `build*Deps` + CLI fino dos scripts
 ```
 criarSuperadmin(email, senha, deps): Promise<void>
   1. userId = await deps.criarAuthUser(email, senha)
-  2. await deps.inserirSuperadmin(userId)
+  2. try: await deps.inserirSuperadmin(userId)
+     catch (erroInsercao):
+       await deps.removerAuthUser(userId)  // compensação: evita usuário órfão
+       throw erroInsercao
 
-buildCriarSuperadminDeps(): usa adminClient().auth.admin.createUser(...) e
-  adminClient().from('superadmin').insert(...)
+buildCriarSuperadminDeps(): usa adminClient().auth.admin.createUser(...),
+  adminClient().from('superadmin').insert(...), e
+  adminClient().auth.admin.deleteUser(...) (compensação)
 ```
+
+Se o passo 2 falhar (ex.: `user_id` já existe em `superadmin`, conflito de
+PK), o `auth.users` criado no passo 1 fica órfão (autenticável, mas sem
+nenhum privilégio) se não for revertido — o `catch` remove esse usuário
+antes de propagar o erro, evitando esse estado inconsistente.
 
 `npm run superadmin:criar -- --email ... --senha ...` (novo script em
 `web/package.json`).
@@ -328,9 +395,22 @@ buildCriarSuperadminDeps(): usa adminClient().auth.admin.createUser(...) e
    200 com toggle real bem-sucedido.
 9. Página `/superadmin/dashboard` sem sessão/sem ser superadmin não lança
    erro (mesmo padrão sem redirect de `/mapa-calor`/`/dashboard`).
+10. **Banco é a autoridade final, não o JWT** (prova da decisão 3): logar
+    como superadmin real (sessão com JWT `superadmin=true` válido), depois
+    `DELETE FROM superadmin WHERE user_id = ...` **sem gerar novo
+    token/sessão** — `GET /api/superadmin/campanhas` com a MESMA sessão
+    (mesmo JWT antigo, ainda com o claim `true`) deve retornar `403`, não
+    `200`. Prova que `requireSuperadmin()` consulta `actor_e_superadmin()`
+    (banco) a cada request, nunca confia no claim do JWT já emitido.
+11. `POST /api/superadmin/logout`: sempre `200`, mesmo chamado sem sessão
+    ativa ou depois de já ter sido removido de `superadmin` (não depende de
+    `requireSuperadmin()`).
 
 ### Scripts CLI
 
-10. `superadmin:criar` cria o `auth.users` + a linha em `superadmin`;
+12. `superadmin:criar` cria o `auth.users` + a linha em `superadmin`;
     rodar `actor_e_superadmin()` impersonando esse usuário logo depois
     confirma `true`.
+13. `superadmin:criar` com inserção em `superadmin` forçada a falhar (ex.:
+    `user_id` duplicado) reverte o `auth.users` recém-criado — confirmar
+    que nenhum usuário órfão sobra depois do erro.
