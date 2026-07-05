@@ -136,9 +136,8 @@ GRANT EXECUTE ON FUNCTION public.actor_tem_modulo(public.modulo_enum) TO authent
 Sem `DECLARE`/`IF` — o `JOIN` já resolve o caso "sem `usuario_campanha`" pra
 `false` sozinho (nenhuma linha casa, `EXISTS` retorna `false`), mais
 idiomático que resolver a campanha numa variável à parte primeiro. `STRICT`
-porque `p_modulo` é sempre obrigatório (sem valor default) — com `STRICT`,
-uma chamada com `p_modulo IS NULL` retorna `NULL` sem nem executar o corpo,
-em vez de rodar a query à toa contra um cast inválido.
+é usado por consistência com as demais funções do projeto e evita executar
+a consulta caso algum parâmetro obrigatório seja recebido como `NULL`.
 
 `SELECT` direto em `public.campanha`/`public.usuario_campanha` dentro desta
 função funciona porque ela é `SECURITY DEFINER` e roda com os privilégios do
@@ -153,8 +152,9 @@ projeto).
 Mutam `campanha.modulos_habilitados` num único `UPDATE` cada (atômico —
 Postgres bloqueia a linha durante o `UPDATE`, então chamadas concorrentes
 serializam em vez de perder uma escrita). `REVOKE ALL` de `authenticated`
-inclusive — só `service_role` chama (que ignora `REVOKE`/RLS por natureza),
-nunca exposta a um client logado. A ordem dos elementos no array não é
+inclusive — essas funções destinam-se exclusivamente ao uso pelo backend
+autenticado com `service_role` (chave privilegiada, própria pra scripts
+administrativos), não sendo expostas a clientes autenticados. A ordem dos elementos no array não é
 significativa (não há nenhuma leitura que dependa de ordem) — `habilitar`
 concatena no fim, `desabilitar` reconstrói via `jsonb_agg` filtrando o
 elemento removido, sem se preocupar em preservar posição relativa dos
