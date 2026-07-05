@@ -15,7 +15,9 @@
     "tre:geocode": "tsx scripts/tre/cli/geocode.ts",
     "tre:publicar": "tsx scripts/tre/cli/publicar.ts",
     "tre:despublicar": "tsx scripts/tre/cli/despublicar.ts",
-    "tre:stats": "tsx scripts/tre/cli/stats.ts"
+    "tre:stats": "tsx scripts/tre/cli/stats.ts",
+    "modulos:habilitar": "tsx scripts/modulos/cli/habilitar.ts",
+    "modulos:desabilitar": "tsx scripts/modulos/cli/desabilitar.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.0",
