@@ -153,7 +153,7 @@ GRANT SELECT ON TABLE public.superadmin TO supabase_auth_admin;
 CREATE POLICY "auth_admin_le_superadmin" ON public.superadmin
   AS PERMISSIVE FOR SELECT TO supabase_auth_admin USING (true);
 
--- service_role (script de criação) escreve e lê.
+-- service_role (CLI de criação e rotas administrativas do painel) lê e escreve.
 GRANT SELECT, INSERT, DELETE ON TABLE public.superadmin TO service_role;
 
 CREATE OR REPLACE FUNCTION public.actor_e_superadmin()
