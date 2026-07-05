@@ -214,7 +214,7 @@ Não commitar o script de fixture.
 - Create: `supabase/migrations/0048_habilitar_desabilitar_modulo.sql`
 
 **Interfaces:**
-- Produces: `public.habilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS boolean`, `public.desabilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS boolean` — `true` se a campanha existia e foi atualizada, `false` se `p_campanha_id` não corresponde a nenhuma campanha (nunca lança exceção só por isso). Ambas `REVOKE`d de `authenticated`/`anon`/`public`, só `service_role` chama. Task 4 (`toggle-modulo.ts` via `buildToggleModuloDeps`) chama via `admin.rpc('habilitar_modulo' | 'desabilitar_modulo', { p_campanha_id, p_modulo })` e trata `data === false` como campanha inexistente.
+- Produces: `public.habilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS boolean`, `public.desabilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS boolean` — `true` se a campanha existe e a operação foi aceita (independente de já estar naquele estado antes), `false` se `p_campanha_id` não corresponde a nenhuma campanha (nunca lança exceção só por isso). Ambas `REVOKE`d de `authenticated`/`anon`/`public`, só `service_role` chama. Task 4 (`toggle-modulo.ts` via `buildToggleModuloDeps`) chama via `admin.rpc('habilitar_modulo' | 'desabilitar_modulo', { p_campanha_id, p_modulo })` e trata `data === false` como campanha inexistente.
 
 - [ ] **Step 1: Escrever a migration**
 
@@ -260,16 +260,23 @@ $$;
 REVOKE ALL ON FUNCTION public.desabilitar_modulo(uuid, public.modulo_enum) FROM public, authenticated, anon;
 ```
 
-**`RETURNS boolean`, não `void`** — `true` quando encontrou e atualizou a
-linha, `false` quando `p_campanha_id` não existe (nenhuma linha casou no
-`UPDATE`, `RETURNING 1` não produz linha nenhuma, `EXISTS` sobre isso é
-`false` — nunca `NULL`, mesmo raciocínio do padrão "coleção vazia sem erro"
-já usado nas fatias anteriores). Sem isso, um `--campanha` com UUID
-inexistente faria o `UPDATE` silenciosamente não afetar nada e o CLI
-imprimiria "módulo habilitado" mesmo sem ter mudado nenhum dado — o
-chamador (Task 4) trata `false` como erro e aborta com mensagem clara, em
-vez de reportar sucesso falso. `STRICT` pelo mesmo motivo do
-`actor_tem_modulo`: ambos os parâmetros são sempre obrigatórios.
+**`RETURNS boolean`, não `void`** — `true` quando a campanha existe e a
+operação foi aceita (**independente de já estar naquele estado antes** —
+habilitar um módulo já habilitado ainda conta como `true`, o `CASE` do
+`UPDATE` só evita duplicar o elemento no array, não faz o `UPDATE` deixar
+de casar a linha); `false` só quando `p_campanha_id` não existe (nenhuma
+linha casou no `UPDATE`, `RETURNING 1` não produz linha nenhuma, `EXISTS`
+sobre isso é `false` — nunca `NULL`, mesmo raciocínio do padrão "coleção
+vazia sem erro" já usado nas fatias anteriores). `true` **não** significa
+"o array mudou de valor" — significa "a campanha existe e a chamada foi
+processada"; a idempotência é sobre o CONTEÚDO do array (não duplicar/não
+falhar ao remover ausente), não sobre o valor de retorno. Sem esse
+booleano, um `--campanha` com UUID inexistente faria o `UPDATE`
+silenciosamente não afetar nada e o CLI imprimiria "módulo habilitado"
+mesmo sem ter mudado nenhum dado — o chamador (Task 4) trata `false` como
+erro e aborta com mensagem clara, em vez de reportar sucesso falso.
+`STRICT` pelo mesmo motivo do `actor_tem_modulo`: ambos os parâmetros são
+sempre obrigatórios.
 
 - [ ] **Step 2: Aplicar via `mcp__supabase__apply_migration`**
 
@@ -301,14 +308,15 @@ Substitua `<campanha_id>` pelo valor impresso no Step 3.
 
 ```sql
 -- Habilitar 'comunicacao': array vai de [] pra ["comunicacao"]; retorna true
--- (achou e atualizou a campanha).
+-- (a campanha existe e a operação foi aceita).
 SELECT public.habilitar_modulo('<campanha_id>', 'comunicacao');
 -- esperado: true
 SELECT modulos_habilitados FROM public.campanha WHERE id = '<campanha_id>';
 -- esperado: ["comunicacao"]
 
 -- Idempotente: habilitar de novo não duplica; ainda retorna true (a
--- campanha existe e foi "atualizada", mesmo que o valor final seja igual).
+-- campanha existe e a operação foi aceita — true não significa "o array
+-- mudou de valor", só "a campanha existe e a chamada foi processada").
 SELECT public.habilitar_modulo('<campanha_id>', 'comunicacao');
 -- esperado: true
 SELECT modulos_habilitados, jsonb_array_length(modulos_habilitados) AS tamanho
@@ -383,7 +391,7 @@ Não commitar o script de fixture.
 
 **Interfaces:**
 - Consumes: `ssrClient` (`web/lib/supabase/ssr.ts`), RPC `actor_tem_modulo` (Task 1).
-- Produces: `MODULOS` (`readonly ['comunicacao', 'ia']`) e `Modulo` (`'comunicacao' | 'ia'`) em `web/lib/modulos.ts` — única fonte da verdade do conjunto de módulos no TypeScript, Task 4 reusa. `hasModulo(modulo: Modulo): Promise<boolean>` — checagem crua, sem semântica HTTP, reusável por Server Components/Server Actions/layouts futuros. `requireModulo(modulo: Modulo): Promise<NextResponse | null>` — wrapper pra rota (`NextResponse` 401/403/500 quando bloqueado, `null` quando liberado). `GET /api/modulos/comunicacao-preview` usa `requireModulo` e retorna `200 {preview: true}` quando liberado.
+- Produces: `MODULOS` (`readonly ['comunicacao', 'ia']`), `Modulo` (`'comunicacao' | 'ia'`) e `isModulo(value: string): value is Modulo` em `web/lib/modulos.ts` — única fonte da verdade do conjunto de módulos no TypeScript, Task 4 reusa (`isModulo` evita cast manual `as Modulo` no CLI). `hasModulo(modulo: Modulo): Promise<boolean>` — checagem crua, sem semântica HTTP, reusável por Server Components/Server Actions/layouts futuros. `requireModulo(modulo: Modulo): Promise<NextResponse | null>` — wrapper pra rota (`NextResponse` 401/403/500 quando bloqueado, `null` quando liberado). `GET /api/modulos/comunicacao-preview` usa `requireModulo` e retorna `200 {preview: true}` quando liberado.
 
 - [ ] **Step 1: Implementar `web/lib/modulos.ts` (única fonte da verdade do enum no TypeScript, sem teste próprio — é só uma constante)**
 
@@ -391,6 +399,10 @@ Não commitar o script de fixture.
 // web/lib/modulos.ts
 export const MODULOS = ['comunicacao', 'ia'] as const;
 export type Modulo = (typeof MODULOS)[number];
+
+export function isModulo(value: string): value is Modulo {
+  return (MODULOS as readonly string[]).includes(value);
+}
 ```
 
 - [ ] **Step 2: Escrever o teste do helper**
@@ -729,7 +741,7 @@ export function buildToggleModuloDeps(): ToggleModuloDeps {
 import { parseArgs } from 'node:util';
 import { toggleModulo } from '../toggle-modulo';
 import { buildToggleModuloDeps } from '../build-toggle-modulo-deps';
-import { MODULOS, type Modulo } from '../../../lib/modulos';
+import { MODULOS, isModulo } from '../../../lib/modulos';
 
 const { values } = parseArgs({
   options: { campanha: { type: 'string' }, modulo: { type: 'string' } },
@@ -738,12 +750,12 @@ if (!values.campanha || !values.modulo) {
   console.error('uso: modulos:habilitar --campanha <uuid> --modulo <comunicacao|ia>');
   process.exit(1);
 }
-if (!(MODULOS as readonly string[]).includes(values.modulo)) {
+if (!isModulo(values.modulo)) {
   console.error(`módulo inválido: "${values.modulo}" — válidos: ${MODULOS.join(', ')}`);
   process.exit(1);
 }
 
-toggleModulo('habilitar', values.campanha, values.modulo as Modulo, buildToggleModuloDeps())
+toggleModulo('habilitar', values.campanha, values.modulo, buildToggleModuloDeps())
   .then(() => console.log(`módulo "${values.modulo}" habilitado pra campanha ${values.campanha}`))
   .catch((err) => {
     console.error('erro ao habilitar módulo:', err);
@@ -756,7 +768,7 @@ toggleModulo('habilitar', values.campanha, values.modulo as Modulo, buildToggleM
 import { parseArgs } from 'node:util';
 import { toggleModulo } from '../toggle-modulo';
 import { buildToggleModuloDeps } from '../build-toggle-modulo-deps';
-import { MODULOS, type Modulo } from '../../../lib/modulos';
+import { MODULOS, isModulo } from '../../../lib/modulos';
 
 const { values } = parseArgs({
   options: { campanha: { type: 'string' }, modulo: { type: 'string' } },
@@ -765,12 +777,12 @@ if (!values.campanha || !values.modulo) {
   console.error('uso: modulos:desabilitar --campanha <uuid> --modulo <comunicacao|ia>');
   process.exit(1);
 }
-if (!(MODULOS as readonly string[]).includes(values.modulo)) {
+if (!isModulo(values.modulo)) {
   console.error(`módulo inválido: "${values.modulo}" — válidos: ${MODULOS.join(', ')}`);
   process.exit(1);
 }
 
-toggleModulo('desabilitar', values.campanha, values.modulo as Modulo, buildToggleModuloDeps())
+toggleModulo('desabilitar', values.campanha, values.modulo, buildToggleModuloDeps())
   .then(() => console.log(`módulo "${values.modulo}" desabilitado pra campanha ${values.campanha}`))
   .catch((err) => {
     console.error('erro ao desabilitar módulo:', err);
