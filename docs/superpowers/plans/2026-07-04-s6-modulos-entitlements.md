@@ -66,6 +66,13 @@ REVOKE ALL ON FUNCTION public.actor_tem_modulo(public.modulo_enum) FROM public, 
 GRANT EXECUTE ON FUNCTION public.actor_tem_modulo(public.modulo_enum) TO authenticated;
 ```
 
+`STABLE` (não `IMMUTABLE`, não `VOLATILE`): a função só lê tabelas e depende
+de `auth.uid()` (que pode mudar entre chamadas de sessões diferentes, mas
+nunca muda DENTRO da mesma instrução), nunca escreve estado — é exatamente
+a definição de `STABLE`. `IMMUTABLE` seria incorreto (o resultado depende de
+dado mutável na tabela `campanha`); documentado aqui pra ninguém trocar por
+engano no futuro.
+
 - [ ] **Step 2: Aplicar via `mcp__supabase__apply_migration`**
 
 `name`: `modulo_enum_e_actor_tem_modulo`, `query`: conteúdo do Step 1.
@@ -207,7 +214,7 @@ Não commitar o script de fixture.
 - Create: `supabase/migrations/0048_habilitar_desabilitar_modulo.sql`
 
 **Interfaces:**
-- Produces: `public.habilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS void`, `public.desabilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS void` — ambas `REVOKE`d de `authenticated`/`anon`/`public`, só `service_role` chama. Task 4 (`toggle-modulo.ts` via `buildToggleModuloDeps`) chama via `admin.rpc('habilitar_modulo' | 'desabilitar_modulo', { p_campanha_id, p_modulo })`.
+- Produces: `public.habilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS boolean`, `public.desabilitar_modulo(p_campanha_id uuid, p_modulo public.modulo_enum) RETURNS boolean` — `true` se a campanha existia e foi atualizada, `false` se `p_campanha_id` não corresponde a nenhuma campanha (nunca lança exceção só por isso). Ambas `REVOKE`d de `authenticated`/`anon`/`public`, só `service_role` chama. Task 4 (`toggle-modulo.ts` via `buildToggleModuloDeps`) chama via `admin.rpc('habilitar_modulo' | 'desabilitar_modulo', { p_campanha_id, p_modulo })` e trata `data === false` como campanha inexistente.
 
 - [ ] **Step 1: Escrever a migration**
 
@@ -216,34 +223,53 @@ Não commitar o script de fixture.
 CREATE OR REPLACE FUNCTION public.habilitar_modulo(
   p_campanha_id uuid,
   p_modulo public.modulo_enum
-) RETURNS void
-LANGUAGE sql SECURITY DEFINER SET search_path = ''
+) RETURNS boolean
+LANGUAGE sql STRICT SECURITY DEFINER SET search_path = ''
 AS $$
-  UPDATE public.campanha
-     SET modulos_habilitados = CASE
-           WHEN modulos_habilitados ? p_modulo::text THEN modulos_habilitados
-           ELSE modulos_habilitados || to_jsonb(p_modulo::text)
-         END
-   WHERE id = p_campanha_id;
+  WITH atualizado AS (
+    UPDATE public.campanha
+       SET modulos_habilitados = CASE
+             WHEN modulos_habilitados ? p_modulo::text THEN modulos_habilitados
+             ELSE modulos_habilitados || to_jsonb(p_modulo::text)
+           END
+     WHERE id = p_campanha_id
+    RETURNING 1
+  )
+  SELECT EXISTS (SELECT 1 FROM atualizado);
 $$;
 REVOKE ALL ON FUNCTION public.habilitar_modulo(uuid, public.modulo_enum) FROM public, authenticated, anon;
 
 CREATE OR REPLACE FUNCTION public.desabilitar_modulo(
   p_campanha_id uuid,
   p_modulo public.modulo_enum
-) RETURNS void
-LANGUAGE sql SECURITY DEFINER SET search_path = ''
+) RETURNS boolean
+LANGUAGE sql STRICT SECURITY DEFINER SET search_path = ''
 AS $$
-  UPDATE public.campanha c
-     SET modulos_habilitados = coalesce((
-           SELECT jsonb_agg(elem)
-             FROM jsonb_array_elements_text(c.modulos_habilitados) elem
-            WHERE elem <> p_modulo::text
-         ), '[]'::jsonb)
-   WHERE c.id = p_campanha_id;
+  WITH atualizado AS (
+    UPDATE public.campanha c
+       SET modulos_habilitados = coalesce((
+             SELECT jsonb_agg(elem)
+               FROM jsonb_array_elements_text(c.modulos_habilitados) elem
+              WHERE elem <> p_modulo::text
+           ), '[]'::jsonb)
+     WHERE c.id = p_campanha_id
+    RETURNING 1
+  )
+  SELECT EXISTS (SELECT 1 FROM atualizado);
 $$;
 REVOKE ALL ON FUNCTION public.desabilitar_modulo(uuid, public.modulo_enum) FROM public, authenticated, anon;
 ```
+
+**`RETURNS boolean`, não `void`** — `true` quando encontrou e atualizou a
+linha, `false` quando `p_campanha_id` não existe (nenhuma linha casou no
+`UPDATE`, `RETURNING 1` não produz linha nenhuma, `EXISTS` sobre isso é
+`false` — nunca `NULL`, mesmo raciocínio do padrão "coleção vazia sem erro"
+já usado nas fatias anteriores). Sem isso, um `--campanha` com UUID
+inexistente faria o `UPDATE` silenciosamente não afetar nada e o CLI
+imprimiria "módulo habilitado" mesmo sem ter mudado nenhum dado — o
+chamador (Task 4) trata `false` como erro e aborta com mensagem clara, em
+vez de reportar sucesso falso. `STRICT` pelo mesmo motivo do
+`actor_tem_modulo`: ambos os parâmetros são sempre obrigatórios.
 
 - [ ] **Step 2: Aplicar via `mcp__supabase__apply_migration`**
 
@@ -274,16 +300,27 @@ console.log('fixture pronta — comeca com modulos_habilitados=[] (default do S0
 Substitua `<campanha_id>` pelo valor impresso no Step 3.
 
 ```sql
--- Habilitar 'comunicacao': array vai de [] pra ["comunicacao"].
+-- Habilitar 'comunicacao': array vai de [] pra ["comunicacao"]; retorna true
+-- (achou e atualizou a campanha).
 SELECT public.habilitar_modulo('<campanha_id>', 'comunicacao');
+-- esperado: true
 SELECT modulos_habilitados FROM public.campanha WHERE id = '<campanha_id>';
 -- esperado: ["comunicacao"]
 
--- Idempotente: habilitar de novo não duplica.
+-- Idempotente: habilitar de novo não duplica; ainda retorna true (a
+-- campanha existe e foi "atualizada", mesmo que o valor final seja igual).
 SELECT public.habilitar_modulo('<campanha_id>', 'comunicacao');
+-- esperado: true
 SELECT modulos_habilitados, jsonb_array_length(modulos_habilitados) AS tamanho
   FROM public.campanha WHERE id = '<campanha_id>';
 -- esperado: ainda ["comunicacao"], tamanho=1 (não virou 2)
+
+-- Campanha inexistente: retorna false, não lança exceção. Nenhuma linha
+-- criada/alterada (não há campanha nenhuma com esse id pra alterar).
+SELECT public.habilitar_modulo(gen_random_uuid(), 'comunicacao');
+-- esperado: false
+SELECT public.desabilitar_modulo(gen_random_uuid(), 'comunicacao');
+-- esperado: false
 
 -- Habilitar um segundo módulo: array cresce sem apagar o primeiro.
 SELECT public.habilitar_modulo('<campanha_id>', 'ia');
@@ -338,6 +375,7 @@ Não commitar o script de fixture.
 ### Task 3: `requireModulo` helper + `GET /api/modulos/comunicacao-preview`
 
 **Files:**
+- Create: `web/lib/modulos.ts`
 - Create: `web/lib/supabase/require-modulo.ts`
 - Create: `web/lib/supabase/require-modulo.test.ts`
 - Create: `web/app/api/modulos/comunicacao-preview/route.ts`
@@ -345,9 +383,17 @@ Não commitar o script de fixture.
 
 **Interfaces:**
 - Consumes: `ssrClient` (`web/lib/supabase/ssr.ts`), RPC `actor_tem_modulo` (Task 1).
-- Produces: `requireModulo(modulo: 'comunicacao' | 'ia'): Promise<NextResponse | null>` — retorna `NextResponse` (401/403/500) quando bloqueado, `null` quando liberado. `GET /api/modulos/comunicacao-preview` usa o helper e retorna `200 {preview: true}` quando liberado.
+- Produces: `MODULOS` (`readonly ['comunicacao', 'ia']`) e `Modulo` (`'comunicacao' | 'ia'`) em `web/lib/modulos.ts` — única fonte da verdade do conjunto de módulos no TypeScript, Task 4 reusa. `hasModulo(modulo: Modulo): Promise<boolean>` — checagem crua, sem semântica HTTP, reusável por Server Components/Server Actions/layouts futuros. `requireModulo(modulo: Modulo): Promise<NextResponse | null>` — wrapper pra rota (`NextResponse` 401/403/500 quando bloqueado, `null` quando liberado). `GET /api/modulos/comunicacao-preview` usa `requireModulo` e retorna `200 {preview: true}` quando liberado.
 
-- [ ] **Step 1: Escrever o teste do helper**
+- [ ] **Step 1: Implementar `web/lib/modulos.ts` (única fonte da verdade do enum no TypeScript, sem teste próprio — é só uma constante)**
+
+```typescript
+// web/lib/modulos.ts
+export const MODULOS = ['comunicacao', 'ia'] as const;
+export type Modulo = (typeof MODULOS)[number];
+```
+
+- [ ] **Step 2: Escrever o teste do helper**
 
 ```typescript
 // web/lib/supabase/require-modulo.test.ts
@@ -365,8 +411,35 @@ function mockSupabase(overrides: Partial<{ user: { id: string } | null; rpcData:
 
 vi.mock('./ssr', () => ({ ssrClient: vi.fn() }));
 
-import { requireModulo } from './require-modulo';
+import { hasModulo, requireModulo } from './require-modulo';
 import { ssrClient } from './ssr';
+
+describe('hasModulo', () => {
+  it('retorna true quando o módulo está habilitado', async () => {
+    const supabase = mockSupabase({ rpcData: true });
+    vi.mocked(ssrClient).mockReturnValue(supabase as never);
+    expect(await hasModulo('comunicacao')).toBe(true);
+    expect(supabase.rpc).toHaveBeenCalledWith('actor_tem_modulo', { p_modulo: 'comunicacao' });
+  });
+
+  it('retorna false sem sessão (sem lançar erro)', async () => {
+    const supabase = mockSupabase({ user: null });
+    vi.mocked(ssrClient).mockReturnValue(supabase as never);
+    expect(await hasModulo('comunicacao')).toBe(false);
+  });
+
+  it('retorna false quando o módulo não está habilitado', async () => {
+    const supabase = mockSupabase({ rpcData: false });
+    vi.mocked(ssrClient).mockReturnValue(supabase as never);
+    expect(await hasModulo('comunicacao')).toBe(false);
+  });
+
+  it('retorna false quando a RPC retorna erro (sem lançar erro)', async () => {
+    const supabase = mockSupabase({ rpcError: { message: 'falha' } });
+    vi.mocked(ssrClient).mockReturnValue(supabase as never);
+    expect(await hasModulo('comunicacao')).toBe(false);
+  });
+});
 
 describe('requireModulo', () => {
   it('retorna null quando o módulo está habilitado', async () => {
@@ -403,38 +476,62 @@ describe('requireModulo', () => {
 });
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falha**
+- [ ] **Step 3: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run lib/supabase/require-modulo.test.ts`
 Expected: FAIL — `Cannot find module './require-modulo'`
 
-- [ ] **Step 3: Implementar o helper**
+- [ ] **Step 4: Implementar o helper — `checarModulo` interno (única checagem) + 2 wrappers públicos**
 
 ```typescript
 // web/lib/supabase/require-modulo.ts
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { ssrClient } from './ssr';
+import type { Modulo } from '../modulos';
 
-export async function requireModulo(modulo: 'comunicacao' | 'ia'): Promise<NextResponse | null> {
+type ResultadoChecagem =
+  | { status: 'ok' }
+  | { status: 'sem-sessao' }
+  | { status: 'sem-modulo' }
+  | { status: 'erro'; mensagem: string };
+
+async function checarModulo(modulo: Modulo): Promise<ResultadoChecagem> {
   const cookieStore = await cookies();
   const supabase = ssrClient(cookieStore);
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ erro: 'não autenticado' }, { status: 401 });
+  if (!user) return { status: 'sem-sessao' };
 
-  const { data: temModulo, error } = await supabase.rpc('actor_tem_modulo', { p_modulo: modulo });
-  if (error) return NextResponse.json({ erro: error.message }, { status: 500 });
-  if (!temModulo) return NextResponse.json({ erro: 'módulo não habilitado' }, { status: 403 });
-  return null;
+  const { data, error } = await supabase.rpc('actor_tem_modulo', { p_modulo: modulo });
+  if (error) return { status: 'erro', mensagem: error.message };
+  return data ? { status: 'ok' } : { status: 'sem-modulo' };
+}
+
+// Checagem crua, sem semântica HTTP — reusável em Server Components,
+// Server Actions e layouts (qualquer lugar que só precise de um booleano,
+// não de uma resposta HTTP pronta).
+export async function hasModulo(modulo: Modulo): Promise<boolean> {
+  const r = await checarModulo(modulo);
+  return r.status === 'ok';
+}
+
+// Wrapper pra route handler: já devolve o NextResponse certo pra cada
+// motivo de bloqueio.
+export async function requireModulo(modulo: Modulo): Promise<NextResponse | null> {
+  const r = await checarModulo(modulo);
+  if (r.status === 'ok') return null;
+  if (r.status === 'sem-sessao') return NextResponse.json({ erro: 'não autenticado' }, { status: 401 });
+  if (r.status === 'sem-modulo') return NextResponse.json({ erro: 'módulo não habilitado' }, { status: 403 });
+  return NextResponse.json({ erro: r.mensagem }, { status: 500 });
 }
 ```
 
-- [ ] **Step 4: Rodar e confirmar que passa**
+- [ ] **Step 5: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run lib/supabase/require-modulo.test.ts`
-Expected: PASS — 4/4
+Expected: PASS — 8/8
 
-- [ ] **Step 5: Escrever o teste da rota**
+- [ ] **Step 6: Escrever o teste da rota**
 
 ```typescript
 // web/app/api/modulos/comunicacao-preview/route.test.ts
@@ -467,17 +564,25 @@ describe('GET /api/modulos/comunicacao-preview', () => {
 });
 ```
 
-- [ ] **Step 6: Rodar e confirmar que falha**
+- [ ] **Step 7: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run app/api/modulos/comunicacao-preview/route.test.ts`
 Expected: FAIL — `Cannot find module './route'`
 
-- [ ] **Step 7: Implementar a rota**
+- [ ] **Step 8: Implementar a rota**
 
 ```typescript
 // web/app/api/modulos/comunicacao-preview/route.ts
 import { NextResponse } from 'next/server';
 import { requireModulo } from '../../../../lib/supabase/require-modulo';
+
+// Força a rota a nunca ser tratada como estática/cacheável pelo App Router —
+// o resultado depende de sessão + estado mutável em modulos_habilitados, e
+// nunca deve ser servido de um cache entre requests diferentes. Na prática
+// o uso de cookies() dentro de requireModulo já opta a rota pra dinâmica
+// automaticamente nesta versão do Next.js, mas deixamos explícito pra não
+// depender desse comportamento implícito sobreviver a um refactor futuro.
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
   const blocked = await requireModulo('comunicacao');
@@ -486,20 +591,20 @@ export async function GET() {
 }
 ```
 
-- [ ] **Step 8: Rodar e confirmar que passa**
+- [ ] **Step 9: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/api/modulos/comunicacao-preview/route.test.ts`
 Expected: PASS — 2/2
 
-- [ ] **Step 9: Verificar contra o banco real (opcional mas recomendado — confirma que `actor_tem_modulo` e `requireModulo` casam de verdade, não só via mock)**
+- [ ] **Step 10: Verificar contra o banco real (opcional mas recomendado — confirma que `actor_tem_modulo` e `requireModulo` casam de verdade, não só via mock)**
 
-Reaproveite a fixture do Task 1, Steps 3-4 (recrie se já limpou): logue de verdade como `userA` (via `POST /api/auth/login` ou sessão real), acesse `GET /api/modulos/comunicacao-preview` com `cd web && npm run dev` rodando — confirme 403 com `modulos_habilitados=[]`, depois rode `UPDATE campanha SET modulos_habilitados='["comunicacao"]'::jsonb WHERE id='<campanha_a_id>'` via `execute_sql` e confirme que a MESMA sessão (sem novo login) já passa a receber 200 (a checagem é por request, não fica em cache de sessão). Limpe a fixture depois.
+Reaproveite a fixture do Task 1, Steps 3-4 (recrie se já limpou): logue de verdade como `userA` (via `POST /api/auth/login` ou sessão real), acesse `GET /api/modulos/comunicacao-preview` com `cd web && npm run dev` rodando — confirme 403 com `modulos_habilitados=[]`, depois rode `UPDATE campanha SET modulos_habilitados='["comunicacao"]'::jsonb WHERE id='<campanha_a_id>'` via `execute_sql` e confirme que a MESMA sessão (sem novo login) já passa a receber 200 (a checagem é por request, não fica em cache de sessão — é exatamente isso que `export const dynamic = 'force-dynamic'` garante). Limpe a fixture depois.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add web/lib/supabase/require-modulo.ts web/lib/supabase/require-modulo.test.ts web/app/api/modulos/comunicacao-preview/route.ts web/app/api/modulos/comunicacao-preview/route.test.ts
-git commit -m "feat(s6): requireModulo helper + GET /api/modulos/comunicacao-preview (PoC do gate)"
+git add web/lib/modulos.ts web/lib/supabase/require-modulo.ts web/lib/supabase/require-modulo.test.ts web/app/api/modulos/comunicacao-preview/route.ts web/app/api/modulos/comunicacao-preview/route.test.ts
+git commit -m "feat(s6): requireModulo/hasModulo + GET /api/modulos/comunicacao-preview (PoC do gate)"
 ```
 
 ---
@@ -515,8 +620,8 @@ git commit -m "feat(s6): requireModulo helper + GET /api/modulos/comunicacao-pre
 - Modify: `web/package.json` (2 novos scripts npm)
 
 **Interfaces:**
-- Consumes: `adminClient` (`web/lib/supabase/server.ts`), RPCs `habilitar_modulo`/`desabilitar_modulo` (Task 2).
-- Produces: `toggleModulo(acao: 'habilitar' | 'desabilitar', campanhaId: string, modulo: string, deps: ToggleModuloDeps): Promise<void>` — orquestrador puro, testável sem rede. `buildToggleModuloDeps(): ToggleModuloDeps` — wiring real via `adminClient()`. Nenhuma task futura consome isso (é o fim da cadeia desta fatia).
+- Consumes: `adminClient` (`web/lib/supabase/server.ts`), RPCs `habilitar_modulo`/`desabilitar_modulo` (Task 2, ambas `RETURNS boolean`), `MODULOS`/`Modulo` (`web/lib/modulos.ts`, Task 3).
+- Produces: `toggleModulo(acao: 'habilitar' | 'desabilitar', campanhaId: string, modulo: Modulo, deps: ToggleModuloDeps): Promise<void>` — orquestrador puro, testável sem rede; lança erro tanto se a RPC retornar `error` quanto se retornar `data === false` (campanha inexistente). `buildToggleModuloDeps(): ToggleModuloDeps` — wiring real via `adminClient()`. Nenhuma task futura consome isso (é o fim da cadeia desta fatia).
 
 - [ ] **Step 1: Escrever o teste do orquestrador**
 
@@ -527,7 +632,7 @@ import { toggleModulo, type ToggleModuloDeps } from './toggle-modulo';
 
 function makeDeps(overrides: Partial<ToggleModuloDeps> = {}): ToggleModuloDeps {
   return {
-    chamarRpc: vi.fn(async () => ({ error: null })),
+    chamarRpc: vi.fn(async () => ({ data: true, error: null })),
     ...overrides,
   };
 }
@@ -552,8 +657,14 @@ describe('toggleModulo', () => {
   });
 
   it('lança erro quando a RPC retorna erro', async () => {
-    const deps = makeDeps({ chamarRpc: vi.fn(async () => ({ error: { message: 'falha no banco' } })) });
+    const deps = makeDeps({ chamarRpc: vi.fn(async () => ({ data: null, error: { message: 'falha no banco' } })) });
     await expect(toggleModulo('habilitar', 'campanha-1', 'comunicacao', deps)).rejects.toThrow('falha no banco');
+  });
+
+  it('lança erro quando a RPC retorna data=false (campanha inexistente)', async () => {
+    const deps = makeDeps({ chamarRpc: vi.fn(async () => ({ data: false, error: null })) });
+    await expect(toggleModulo('habilitar', 'campanha-inexistente', 'comunicacao', deps))
+      .rejects.toThrow('campanha-inexistente não encontrada');
   });
 });
 ```
@@ -567,29 +678,32 @@ Expected: FAIL — `Cannot find module './toggle-modulo'`
 
 ```typescript
 // web/scripts/modulos/toggle-modulo.ts
+import type { Modulo } from '../../lib/modulos';
+
 export type ToggleModuloDeps = {
   chamarRpc(
     rpcName: 'habilitar_modulo' | 'desabilitar_modulo',
     args: { p_campanha_id: string; p_modulo: string },
-  ): Promise<{ error: { message: string } | null }>;
+  ): Promise<{ data: boolean | null; error: { message: string } | null }>;
 };
 
 export async function toggleModulo(
   acao: 'habilitar' | 'desabilitar',
   campanhaId: string,
-  modulo: string,
+  modulo: Modulo,
   deps: ToggleModuloDeps,
 ): Promise<void> {
   const rpcName = acao === 'habilitar' ? 'habilitar_modulo' : 'desabilitar_modulo';
-  const { error } = await deps.chamarRpc(rpcName, { p_campanha_id: campanhaId, p_modulo: modulo });
+  const { data, error } = await deps.chamarRpc(rpcName, { p_campanha_id: campanhaId, p_modulo: modulo });
   if (error) throw new Error(error.message);
+  if (!data) throw new Error(`campanha ${campanhaId} não encontrada`);
 }
 ```
 
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run scripts/modulos/toggle-modulo.test.ts`
-Expected: PASS — 3/3
+Expected: PASS — 4/4
 
 - [ ] **Step 5: Implementar `buildToggleModuloDeps` (wiring real, sem teste próprio — só `adminClient` + `.rpc(...)`, mesmo padrão de `build-lote-deps.ts` no S3)**
 
@@ -608,13 +722,14 @@ export function buildToggleModuloDeps(): ToggleModuloDeps {
 }
 ```
 
-- [ ] **Step 6: Implementar os 2 entrypoints CLI**
+- [ ] **Step 6: Implementar os 2 entrypoints CLI — validam o módulo contra `MODULOS` antes de chamar `toggleModulo` (rejeita cedo, com mensagem clara, em vez de deixar o cast do enum falhar no banco)**
 
 ```typescript
 // web/scripts/modulos/cli/habilitar.ts
 import { parseArgs } from 'node:util';
 import { toggleModulo } from '../toggle-modulo';
 import { buildToggleModuloDeps } from '../build-toggle-modulo-deps';
+import { MODULOS, type Modulo } from '../../../lib/modulos';
 
 const { values } = parseArgs({
   options: { campanha: { type: 'string' }, modulo: { type: 'string' } },
@@ -623,8 +738,12 @@ if (!values.campanha || !values.modulo) {
   console.error('uso: modulos:habilitar --campanha <uuid> --modulo <comunicacao|ia>');
   process.exit(1);
 }
+if (!(MODULOS as readonly string[]).includes(values.modulo)) {
+  console.error(`módulo inválido: "${values.modulo}" — válidos: ${MODULOS.join(', ')}`);
+  process.exit(1);
+}
 
-toggleModulo('habilitar', values.campanha, values.modulo, buildToggleModuloDeps())
+toggleModulo('habilitar', values.campanha, values.modulo as Modulo, buildToggleModuloDeps())
   .then(() => console.log(`módulo "${values.modulo}" habilitado pra campanha ${values.campanha}`))
   .catch((err) => {
     console.error('erro ao habilitar módulo:', err);
@@ -637,6 +756,7 @@ toggleModulo('habilitar', values.campanha, values.modulo, buildToggleModuloDeps(
 import { parseArgs } from 'node:util';
 import { toggleModulo } from '../toggle-modulo';
 import { buildToggleModuloDeps } from '../build-toggle-modulo-deps';
+import { MODULOS, type Modulo } from '../../../lib/modulos';
 
 const { values } = parseArgs({
   options: { campanha: { type: 'string' }, modulo: { type: 'string' } },
@@ -645,8 +765,12 @@ if (!values.campanha || !values.modulo) {
   console.error('uso: modulos:desabilitar --campanha <uuid> --modulo <comunicacao|ia>');
   process.exit(1);
 }
+if (!(MODULOS as readonly string[]).includes(values.modulo)) {
+  console.error(`módulo inválido: "${values.modulo}" — válidos: ${MODULOS.join(', ')}`);
+  process.exit(1);
+}
 
-toggleModulo('desabilitar', values.campanha, values.modulo, buildToggleModuloDeps())
+toggleModulo('desabilitar', values.campanha, values.modulo as Modulo, buildToggleModuloDeps())
   .then(() => console.log(`módulo "${values.modulo}" desabilitado pra campanha ${values.campanha}`))
   .catch((err) => {
     console.error('erro ao desabilitar módulo:', err);
@@ -709,6 +833,20 @@ Limpar a fixture:
 DELETE FROM public.campanha WHERE id = '<campanha_id>';
 ```
 
+Confirmar as 2 rejeições precoces do CLI (sem tocar o banco):
+
+```bash
+cd web && npx tsx --env-file=.env.local scripts/modulos/cli/habilitar.ts --campanha 00000000-0000-0000-0000-000000000000 --modulo modulo-invalido
+```
+
+Expected: imprime `módulo inválido: "modulo-invalido" — válidos: comunicacao, ia`, `process.exit(1)` — nunca chega a chamar a RPC.
+
+```bash
+cd web && npx tsx --env-file=.env.local scripts/modulos/cli/habilitar.ts --campanha 00000000-0000-0000-0000-000000000000 --modulo comunicacao
+```
+
+Expected: módulo válido mas campanha inexistente — chega a chamar a RPC, que retorna `data=false`; imprime `erro ao habilitar módulo: Error: campanha 00000000-0000-0000-0000-000000000000 não encontrada`, `process.exit(1)`.
+
 - [ ] **Step 9: Rodar a suíte inteira do projeto**
 
 Run: `cd web && npx vitest run`
@@ -731,7 +869,7 @@ git commit -m "feat(s6): scripts modulos:habilitar/modulos:desabilitar (CLI fino
 
 **2. Placeholder scan:** nenhum "TBD"/"similar à Task N sem código". Toda task tem SQL/TS completo.
 
-**3. Consistência de tipos:** `modulo: 'comunicacao' | 'ia'` usado identicamente em `requireModulo` (Task 3) e no enum `modulo_enum` (Task 1) — mesmos 2 valores, mesma ordem de menção em toda a fatia. `ToggleModuloDeps.chamarRpc` (Task 4) tem a assinatura `(rpcName: 'habilitar_modulo' | 'desabilitar_modulo', args: {p_campanha_id, p_modulo}) => Promise<{error}>` — casa exatamente com o formato de retorno do `supabase-js` `.rpc(...)` (`{data, error}`, aqui só `error` é usado já que as funções retornam `void`) e com os nomes de parâmetro das funções SQL da Task 2 (`p_campanha_id`, `p_modulo`).
+**3. Consistência de tipos:** `Modulo` (`web/lib/modulos.ts`, Task 3) é a única fonte da verdade no TypeScript pros 2 valores do enum `modulo_enum` (Task 1) — `hasModulo`/`requireModulo` (Task 3), `toggleModulo` (Task 4) e os 2 entrypoints CLI (Task 4) todos importam esse mesmo tipo, nenhum repete `'comunicacao' | 'ia'` solto. `ToggleModuloDeps.chamarRpc` (Task 4) tem a assinatura `(rpcName: 'habilitar_modulo' | 'desabilitar_modulo', args: {p_campanha_id, p_modulo}) => Promise<{data: boolean | null, error}>` — casa exatamente com o formato de retorno do `supabase-js` `.rpc(...)` (`{data, error}`) e com o `RETURNS boolean` das funções SQL da Task 2 (`true`=achou e atualizou, `false`=campanha inexistente) — `toggleModulo` trata `data === false` como erro, não como sucesso silencioso.
 
 **Gap encontrado e corrigido durante o self-review:** a spec não especifica se o CLI (Task 4) precisa de uma verificação end-to-end contra o banco real, além do teste unitário do orquestrador — adicionado como Step 8 da Task 4 (execução real do `tsx` contra uma fixture temporária), fechando o loop entre "a lógica está correta" (teste unitário, Step 1-4) e "o script real funciona de ponta a ponta" (Step 8), mesmo padrão de verificação em 2 camadas usado nas fatias anteriores (S4 Task 8, S5 Task 12).
 
