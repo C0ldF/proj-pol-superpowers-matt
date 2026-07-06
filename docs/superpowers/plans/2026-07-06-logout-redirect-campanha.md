@@ -29,12 +29,17 @@ route.ts`, S7) + botão "Sair" no `NavShell` compartilhado. (2)
   de rede não impede o `window.location.href = '/login'` de rodar depois.
 - Redirect usa `redirect()` de `next/navigation`, não `router.push` nem
   texto inline. Sem preservar `?next=` — sempre `/login` puro.
-- `NavShell` (`web/app/components/NavShell.tsx`) **não** precisa de
-  `'use client'` própria — confirmado empiricamente nesta sessão (`render()`
-  via `@testing-library/react` funciona sem contexto de router) e contra
+- `NavShell` (`web/app/components/NavShell.tsx`), **no estado anterior a
+  esta fatia** (só `Link`s estáticos, nenhum handler próprio), não precisa
+  de `'use client'` — confirmado empiricamente nesta sessão (`render()` via
+  `@testing-library/react` funciona sem contexto de router) e contra
   `web/node_modules/next/dist/docs/01-app/01-getting-started/
   05-server-and-client-components.md:176`: um arquivo importado e
-  renderizado só por Client Components já faz parte do bundle cliente.
+  renderizado só por Client Components já faz parte do bundle cliente. Essa
+  premissa muda assim que o arquivo passar a definir um handler próprio
+  (`onClick`, `useState`, etc.) — que é exatamente o que a Task 1 faz: ela
+  adiciona `'use client'` ao `NavShell` porque o botão "Sair" precisa de
+  `onClick` definido ali mesmo.
 - Testes de componente que usam `render`/`screen`/`fireEvent` (RTL) exigem
   `import '@testing-library/jest-dom/vitest'` — sem isso, matchers como
   `toBeInTheDocument`/`toHaveAttribute` não existem (`Invalid Chai
@@ -192,6 +197,13 @@ describe('POST /api/auth/logout', () => {
     expect(await res.json()).toEqual({ ok: true });
     expect(signOut).toHaveBeenCalled();
   });
+
+  it('200 mesmo quando signOut() resolve com erro (sem gate, sempre retorna ok)', async () => {
+    signOut.mockResolvedValueOnce({ error: new Error('sessão já inválida') });
+    const res = await POST();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
 });
 ```
 
@@ -219,9 +231,23 @@ export async function POST() {
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/api/auth/logout/route.test.ts`
-Expected: PASS — 1/1
+Expected: PASS — 2/2
 
-- [ ] **Step 5: Escrever o teste do `NavShell` (reescreve o arquivo inteiro, preservando a asserção original com RTL no lugar de `renderToStaticMarkup`)**
+- [ ] **Step 5: Commit intermediário (rota de logout, sem o botão ainda)**
+
+```bash
+git add web/app/api/auth/logout/route.ts web/app/api/auth/logout/route.test.ts
+git commit -m "feat: POST /api/auth/logout"
+```
+
+- [ ] **Step 6: Escrever o teste do `NavShell` (reescreve o arquivo inteiro, preservando a asserção original com RTL no lugar de `renderToStaticMarkup`)**
+
+`window.location` precisa ser substituído por um objeto simples antes de
+cada teste que verifica navegação — o `jsdom` deste projeto não navega de
+verdade (`window.location.href = '...'` emite "Not implemented: navigation
+to another Document" e o valor lido depois continua o mesmo, confirmado
+empiricamente nesta sessão). Um `beforeEach` que troca `window.location`
+por `{ href: '' }` torna a atribuição observável no teste.
 
 ```tsx
 // web/app/components/NavShell.test.tsx
@@ -231,46 +257,65 @@ import '@testing-library/jest-dom/vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { NavShell } from './NavShell';
 
+function renderNav() {
+  return render(
+    <NavShell>
+      <p>conteudo-de-teste</p>
+    </NavShell>,
+  );
+}
+
 describe('NavShell', () => {
   afterEach(() => cleanup());
 
   beforeEach(() => {
     globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) })) as never;
+    // @ts-expect-error jsdom não navega de verdade — substitui por um objeto simples e observável
+    delete window.location;
+    // @ts-expect-error idem
+    window.location = { href: '' };
   });
 
   it('renderiza os 2 links de navegação e o children', () => {
-    render(
-      <NavShell>
-        <p>conteudo-de-teste</p>
-      </NavShell>,
-    );
+    renderNav();
     expect(screen.getByText('Mapa de Calor')).toHaveAttribute('href', '/mapa-calor');
     expect(screen.getByText('Dashboard')).toHaveAttribute('href', '/dashboard');
     expect(screen.getByText('conteudo-de-teste')).toBeInTheDocument();
   });
 
-  it('clicar em Sair dispara POST /api/auth/logout', async () => {
-    render(
-      <NavShell>
-        <p>conteudo-de-teste</p>
-      </NavShell>,
-    );
+  it('clicar em Sair dispara POST /api/auth/logout e redireciona pro /login', async () => {
+    renderNav();
     fireEvent.click(screen.getByText('Sair'));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith('/api/auth/logout', { method: 'POST' });
     });
+    await waitFor(() => {
+      expect(window.location.href).toBe('/login');
+    });
+  });
+
+  it('redireciona pro /login mesmo se o fetch falhar (falha de rede)', async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('network down');
+    }) as never;
+    renderNav();
+    fireEvent.click(screen.getByText('Sair'));
+
+    await waitFor(() => {
+      expect(window.location.href).toBe('/login');
+    });
   });
 });
 ```
 
-- [ ] **Step 6: Rodar e confirmar que falha**
+- [ ] **Step 7: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run app/components/NavShell.test.tsx`
 Expected: FAIL — `Unable to find an element with the text: Sair` (o botão
 ainda não existe)
 
-- [ ] **Step 7: Implementar o botão no `NavShell`**
+- [ ] **Step 8: Implementar o botão no `NavShell`**
 
 ```tsx
 // web/app/components/NavShell.tsx
@@ -291,7 +336,7 @@ export function NavShell({ children }: { children: React.ReactNode }) {
           {' '}
           <Link href="/dashboard">Dashboard</Link>
           {' '}
-          <button onClick={sair}>Sair</button>
+          <button type="button" onClick={sair}>Sair</button>
         </nav>
       </header>
       <main>{children}</main>
@@ -300,33 +345,34 @@ export function NavShell({ children }: { children: React.ReactNode }) {
 }
 ```
 
-Nota: `NavShell` ganha `'use client'` porque agora define um `onClick`
-próprio (evento de interação) — diferente da premissa da Global Constraint
-acima (que dizia que ele "não precisa" da diretiva enquanto só continha
-`Link`s estáticos e nenhum event handler próprio). Um arquivo que define
-seu próprio `onClick` precisa da diretiva onde a função é declarada, ainda
-que ele já fosse alcançado só por Client Components — a regra do
-`05-server-and-client-components.md:176` cobre "não precisar adicionar a
-outros componentes", não "nunca precisar em nenhum arquivo com handler
-próprio". Adicionar `'use client'` aqui é seguro e não muda nenhum
-comportamento de bundle além do já existente (o arquivo já estava no grafo
-client).
+Notas de implementação:
+- `NavShell` ganha `'use client'` porque agora define um `onClick` próprio
+  (evento de interação) — isso não estava previsto no estado anterior do
+  arquivo (ver Global Constraints), mas passa a ser necessário assim que
+  este Step introduz o handler.
+- `type="button"` explícito no botão: sem isso, um `<button>` dentro de um
+  `<form>` (caso o `NavShell` algum dia seja usado dentro de um) faria
+  submit por padrão em vez de só rodar o `onClick` — inofensivo hoje (não
+  há `<form>` envolvendo o `NavShell`), mas custa zero declarar.
+- `.catch(() => {})` garante que a rejeição do `fetch` não impede a linha
+  seguinte (`window.location.href = '/login'`) de rodar — é exatamente o
+  comportamento que o 3º teste do Step 6 verifica.
 
-- [ ] **Step 8: Rodar e confirmar que passa**
+- [ ] **Step 9: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/components/NavShell.test.tsx`
-Expected: PASS — 2/2
+Expected: PASS — 3/3
 
-- [ ] **Step 9: Rodar a suíte inteira do projeto**
+- [ ] **Step 10: Rodar a suíte inteira do projeto**
 
 Run: `cd web && npx vitest run`
 Expected: todos os arquivos passam, incluindo os pré-existentes.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add web/app/api/auth/logout/route.ts web/app/api/auth/logout/route.test.ts web/app/components/NavShell.tsx web/app/components/NavShell.test.tsx
-git commit -m "feat: logout de campanha (POST /api/auth/logout + botão Sair no NavShell)"
+git add web/app/components/NavShell.tsx web/app/components/NavShell.test.tsx
+git commit -m "feat: botão Sair no NavShell (logout de campanha)"
 ```
 
 ---
@@ -354,12 +400,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 vi.mock('next/headers', () => ({ cookies: vi.fn(async () => ({ getAll: () => [] })) }));
 vi.mock('../../lib/supabase/ssr', () => ({ ssrClient: vi.fn() }));
-vi.mock('./DashboardClient', () => ({
-  DashboardClient: () => 'dashboard-client-mock',
-}));
+
+const DashboardClient = vi.fn(() => 'dashboard-client-mock');
+vi.mock('./DashboardClient', () => ({ DashboardClient: () => DashboardClient() }));
+
+const REDIRECT_SENTINEL = Symbol('NEXT_REDIRECT');
 vi.mock('next/navigation', () => ({
   redirect: vi.fn(() => {
-    throw new Error('NEXT_REDIRECT');
+    throw REDIRECT_SENTINEL;
   }),
 }));
 
@@ -373,8 +421,9 @@ describe('/dashboard page', () => {
       auth: { getUser: async () => ({ data: { user: null }, error: null }) },
     } as never);
 
-    await expect(Page()).rejects.toThrow('NEXT_REDIRECT');
+    await expect(Page()).rejects.toBe(REDIRECT_SENTINEL);
     expect(redirect).toHaveBeenCalledWith('/login');
+    expect(DashboardClient).not.toHaveBeenCalled();
   });
 
   it('renderiza o dashboard quando autenticado', async () => {
@@ -388,12 +437,21 @@ describe('/dashboard page', () => {
 });
 ```
 
+Usar um `Symbol` sentinela (em vez de `throw new Error('NEXT_REDIRECT')`)
+desacopla o teste do texto da mensagem de erro — a asserção
+`rejects.toBe(REDIRECT_SENTINEL)` confirma exatamente qual exceção
+propagou, sem depender de string. `DashboardClient` vira `vi.fn()` só pra
+permitir a asserção `not.toHaveBeenCalled()` no caso não-autenticado — a
+função real (`() => DashboardClient()`) ainda retorna a string
+`'dashboard-client-mock'` esperada pela asserção `toContain` no segundo
+teste.
+
 - [ ] **Step 2: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run app/dashboard/page.test.tsx`
 Expected: FAIL — o primeiro teste falha porque a página ainda retorna
 `<p>não autenticado</p>` em vez de chamar `redirect`, então `Page()` não
-rejeita e a asserção `rejects.toThrow` falha.
+rejeita e a asserção `rejects.toBe` falha.
 
 - [ ] **Step 3: Implementar o redirect em `/dashboard`**
 
@@ -431,12 +489,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 vi.mock('next/headers', () => ({ cookies: vi.fn(async () => ({ getAll: () => [] })) }));
 vi.mock('../../lib/supabase/ssr', () => ({ ssrClient: vi.fn() }));
-vi.mock('./MapaCalorClient', () => ({
-  MapaCalorClient: () => 'mapa-calor-client-mock',
-}));
+
+const MapaCalorClient = vi.fn(() => 'mapa-calor-client-mock');
+vi.mock('./MapaCalorClient', () => ({ MapaCalorClient: () => MapaCalorClient() }));
+
+const REDIRECT_SENTINEL = Symbol('NEXT_REDIRECT');
 vi.mock('next/navigation', () => ({
   redirect: vi.fn(() => {
-    throw new Error('NEXT_REDIRECT');
+    throw REDIRECT_SENTINEL;
   }),
 }));
 
@@ -450,8 +510,9 @@ describe('/mapa-calor page', () => {
       auth: { getUser: async () => ({ data: { user: null }, error: null }) },
     } as never);
 
-    await expect(Page()).rejects.toThrow('NEXT_REDIRECT');
+    await expect(Page()).rejects.toBe(REDIRECT_SENTINEL);
     expect(redirect).toHaveBeenCalledWith('/login');
+    expect(MapaCalorClient).not.toHaveBeenCalled();
   });
 
   it('renderiza o mapa quando autenticado', async () => {
@@ -514,32 +575,39 @@ git commit -m "feat: /dashboard e /mapa-calor redirecionam pro /login quando nã
 ## Self-Review
 
 **1. Cobertura do spec:** decisão 1 (duas peças, sem arquivo em comum) →
-Task 1 (4 arquivos: rota + teste + `NavShell` + teste) e Task 2 (4 arquivos:
-2 páginas + 2 testes), zero overlap confirmado; decisão 2 (rota nova, não
-reaproveita `/api/superadmin/logout`) → Task 1 Step 3, path
-`web/app/api/auth/logout/`; decisão 3 (sem checagem de autorização) → Task
-1 Step 3 (sem `requireX` nenhum antes do `signOut`); decisão 4 (`NavShell`
-sem `'use client'` própria — na prática ganhou a diretiva no Step 7 porque
-o botão introduz `onClick` que a decisão 4 original não previa
-explicitamente; note de correção deixada no próprio Step 7) → Task 1;
-decisão 5 (`.catch(() => {})` antes do redirect) → Task 1 Step 7; decisão 6
-(`redirect()` de `next/navigation`) → Task 2 Steps 3 e 7; decisão 7 (sem
-`?next=`) → Task 2 (nenhum query param usado); decisão 8 (gotcha de teste
-do `redirect`, mock que lança) → Task 2 Steps 1 e 5. Os 6 itens de teste do
-spec → cobertos 1:1 pelas Tasks 1 (testes 1-3) e 2 (testes 4-6, dobrados
-pras duas páginas). Não-objetivos: nenhuma task adiciona `?next=`, mexe em
+Task 1 (4 arquivos: rota + teste + `NavShell` + teste, em 2 commits
+independentes) e Task 2 (4 arquivos: 2 páginas + 2 testes), zero overlap
+confirmado; decisão 2 (rota nova, não reaproveita `/api/superadmin/logout`)
+→ Task 1 Step 3, path `web/app/api/auth/logout/`; decisão 3 (sem checagem
+de autorização, sempre 200) → Task 1 Step 3 (sem `requireX` nenhum antes do
+`signOut`) e Step 1 teste 2 (200 mesmo com `signOut()` retornando erro);
+decisão 4 (`NavShell` sem `'use client'` própria *no estado anterior à
+fatia*) → Task 1 Step 8, nota explícita de que a implementação introduz a
+diretiva porque o botão muda essa premissa (não contradiz a decisão, que
+falava do código antes da mudança); decisão 5 (`.catch(() => {})` antes do
+redirect, sempre navega) → Task 1 Step 8 + Step 6 teste 3 (fetch falha,
+ainda redireciona); decisão 6 (`redirect()` de `next/navigation`) → Task 2
+Steps 3 e 7; decisão 7 (sem `?next=`) → Task 2 (nenhum query param usado);
+decisão 8 (gotcha de teste do `redirect`, mock que lança) → Task 2 Steps 1
+e 5, usando um `Symbol` sentinela em vez de string de erro. Os 6 itens de
+teste do spec → cobertos e ampliados: Task 1 tem 2 testes de rota (o 2º
+além do spec, cobrindo o caso de erro em `signOut()`) e 3 testes de
+`NavShell` (o 3º, falha de rede, além do spec); Task 2 tem os 4 testes
+(2 por página), cada um agora também confirmando que o client component
+mockado nunca foi chamado no caso não-autenticado (além do que o spec
+pedia). Não-objetivos: nenhuma task adiciona `?next=`, mexe em
 `/superadmin/*`, cria redirect em outras páginas, adiciona CSS, ou mexe em
 `audit_log` — confirmado por omissão.
 
 **Gap encontrado e corrigido durante o self-review:** a decisão 4 do spec
 ("`NavShell` não precisa de `'use client'` própria") foi verificada e
 confirmada correta *para o código anterior a esta fatia* (sem handler
-próprio) — mas a implementação do botão "Sair" (Step 7) introduz um
+próprio) — mas a implementação do botão "Sair" (Task 1 Step 8) introduz um
 `onClick` definido dentro do próprio `NavShell.tsx`, o que aciona a regra
 "Client Components need event handlers" independente de quem importa o
-arquivo. `'use client'` foi adicionado no Step 7 com uma nota explicando a
+arquivo. `'use client'` foi adicionado no Step 8 com uma nota explicando a
 diferença. Isso não contradiz a decisão 4 (que falava do estado do arquivo
-antes da mudança) — é a mudança do Step 7 que muda a premissa.
+antes da mudança) — é a mudança do Step 8 que muda a premissa.
 
 **2. Placeholder scan:** nenhum "TBD"/"similar à Task N sem código". Toda
 task tem código completo (teste + implementação), incluindo os 2 arquivos
@@ -550,6 +618,24 @@ inteiros reescritos no lugar de diffs parciais.
 independentes. `sair()` (Task 1) e `entrar()` (página `/login`, fatia
 anterior) seguem o mesmo padrão de nomes em português já estabelecido nas
 páginas de auth do projeto.
+
+**4. Riscos conhecidos** (pra quem executar este plano meses depois):
+- `window.location.href` não navega de verdade no `jsdom` deste projeto —
+  qualquer teste que precise observar a navegação (Task 1, testes 2-3 do
+  `NavShell`) precisa primeiro substituir `window.location` por um objeto
+  simples (`delete window.location; window.location = { href: '' }`) antes
+  de cada teste. Sem isso, a asserção falha silenciosamente comparando
+  contra a URL default do `jsdom` (`http://localhost:3000/`), não contra
+  `'/login'` — confirmado empiricamente nesta sessão.
+- `redirect()` (de `next/navigation`) funciona lançando uma exceção por
+  design do Next — qualquer teste de página protegida (Task 2) precisa
+  mockar `redirect` pra também lançar, senão o teste passa mesmo que a
+  página nunca chame `redirect` de verdade (o código cai no `return
+  <Client />` de qualquer jeito).
+- `fetch` precisa continuar sendo mockado globalmente
+  (`globalThis.fetch = vi.fn(...)`) em todo teste de componente client que
+  dispare requisições — não há mock automático/global configurado no
+  projeto (confirmado: sem `vitest.config`/setup file compartilhado).
 
 ---
 
