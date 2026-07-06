@@ -17,7 +17,8 @@
     "tre:despublicar": "tsx scripts/tre/cli/despublicar.ts",
     "tre:stats": "tsx scripts/tre/cli/stats.ts",
     "modulos:habilitar": "tsx scripts/modulos/cli/habilitar.ts",
-    "modulos:desabilitar": "tsx scripts/modulos/cli/desabilitar.ts"
+    "modulos:desabilitar": "tsx scripts/modulos/cli/desabilitar.ts",
+    "superadmin:criar": "tsx scripts/superadmin/cli/criar.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.0",
