@@ -2,7 +2,7 @@
 
 Data: 2026-07-06
 Depende de S1 (`ssrClient`, sessão de login), da página `/login` (2026-07-06,
-merjada em `a18bdc0`) e do `NavShell`/`/dashboard`/`/mapa-calor` (S4/S5).
+integrada em `a18bdc0`) e do `NavShell`/`/dashboard`/`/mapa-calor` (S4/S5).
 Não está no roadmap original — fecha um gap que a própria página `/login`
 abriu: hoje o usuário de campanha consegue entrar mas não tem como sair pela
 UI, e `/dashboard`/`/mapa-calor` ainda mostram um texto morto ("não
@@ -24,30 +24,38 @@ Duas peças pequenas e independentes:
    dá pra construir e revisar cada uma isoladamente.
 2. **Rota de logout nova, não reaproveita `/api/superadmin/logout`.** As
    duas fariam a mesma coisa tecnicamente (`ssrClient(cookies()).auth.
-   signOut()`), mas o projeto já mantém `/api/auth/*` (identidade de
-   campanha, desde S1) e `/api/superadmin/*` (identidade separada, S7) como
+   signOut()`), mas o projeto já mantém `/api/auth/*` (usuário de campanha,
+   desde S1) e `/api/superadmin/*` (identidade separada, S7) como
    namespaces distintos — misturar os dois criaria acoplamento conceitual
    entre identidades que o resto do projeto trata como não relacionadas
    (ADR 0004, escada de papéis). `web/app/api/superadmin/logout/route.ts`
    (S7) é a referência estrutural exata, só troca de path.
 3. **Sem checagem de autorização na rota de logout.** Igual à decisão já
-   tomada pro logout do Superadmin: sair deve funcionar mesmo com sessão
-   estranha/expirada/já inválida — a pessoa ainda quer conseguir sair.
-   `POST /api/auth/logout` sempre chama `signOut()` e sempre retorna
-   `200 {ok:true}`, sem gate nenhum antes.
+   tomada pro logout do Superadmin (S7): sair deve funcionar mesmo com
+   sessão de campanha estranha/expirada/já inválida — a pessoa ainda quer
+   conseguir sair. `POST /api/auth/logout` sempre chama `signOut()` e
+   sempre retorna `200 {ok:true}`, sem gate nenhum antes.
 4. **Botão "Sair" dentro do `NavShell`.** Único component compartilhado por
    `/dashboard` e `/mapa-calor` — um botão só cobre as duas telas. `NavShell`
-   não precisa da diretiva `'use client'` própria: ele já é consumido
-   exclusivamente por `DashboardClient`/`MapaCalorClient`, que são `'use
-   client'` — qualquer código importado por um client component já roda no
-   bundle do cliente, então o `onClick` funciona sem marcar o arquivo.
-5. **Logout: `fetch` direto, sem `try/catch`.** Diferente da página `/login`
-   (que tratou erro de rede como melhoria deliberada sobre o precedente),
-   aqui não há formulário nem estado de erro pro usuário ver — clicar em
-   "Sair" e a requisição falhar silenciosamente (ex.: offline) não é pior do
-   que continuar em uma tela que já vai redirecionar de qualquer forma no
-   próximo request sem sessão válida. Mesmo nível de tratamento do botão
-   "Sair" do Superadmin (S7): sem tratamento de erro de rede.
+   continua sendo usado só dentro de `DashboardClient`/`MapaCalorClient`,
+   que já são Client Components — não há necessidade de criar um wrapper
+   novo, nem de marcar `NavShell` com `'use client'` própria, só pra este
+   botão.
+5. **Logout: redireciona sempre, mesmo se o `fetch` falhar.** Diferente da
+   página `/login` (que trata erro de rede como melhoria deliberada sobre o
+   precedente, mostrando mensagem pro usuário), aqui não há formulário nem
+   estado de erro — clicar em "Sair" deve levar pro `/login` de qualquer
+   jeito (offline, timeout, o que for), porque ficar preso na tela
+   autenticada é pior do que uma tentativa de logout que talvez não tenha
+   limpado a sessão no servidor (o próximo request sem sessão válida
+   redireciona de novo de qualquer forma). Implementação:
+   `await fetch(...).catch(() => {})` antes do `window.location.href` —
+   o `.catch` vazio garante que uma rejeição da Promise não impede a
+   navegação. O botão "Sair" do Superadmin (S7) tem exatamente essa mesma
+   lacuna (`await fetch(...)` seguido de `window.location.href` sem
+   `.catch`) — não é corrigido aqui (fora de escopo desta fatia, que só
+   toca `NavShell`/`/dashboard`/`/mapa-calor`), mas o `.catch()` desta
+   fatia evita repetir o mesmo defeito no código novo.
 6. **Redirect via `redirect()` de `next/navigation`, não texto inline.**
    `web/app/dashboard/page.tsx` e `web/app/mapa-calor/page.tsx` trocam
    `if (!user) return <p>não autenticado</p>;` por
@@ -64,8 +72,9 @@ Duas peças pequenas e independentes:
    registra a chamada sem lançar deixaria o código cair pro `return
    <DashboardClient />` de qualquer forma, e o teste passaria mesmo com a
    `DashboardClient`/`MapaCalorClient` renderizando por baixo do radar. O
-   mock precisa lançar de propósito; o teste afirma que a chamada da página
-   rejeita E que `redirect` foi chamado com `'/login'`.
+   mock precisa lançar de propósito, reproduzindo o comportamento real do
+   `redirect()` no Next.js; o teste afirma que a chamada da página rejeita
+   E que `redirect` foi chamado com `'/login'`.
 
 ## Não-objetivos
 
@@ -95,13 +104,14 @@ POST /api/auth/logout
 
 ```
 onClick "Sair":
-  1. fetch('/api/auth/logout', {method: 'POST'})
+  1. await fetch('/api/auth/logout', {method: 'POST'}).catch(() => {})
   2. window.location.href = '/login'
 ```
 
-Sem aguardar o `fetch` resolver antes do redirect seria incorreto (o cookie
-precisa ser limpo antes da navegação) — o `fetch` é aguardado (`await`)
-dentro de uma função assíncrona antes do `window.location.href`.
+`window.location.href`, não `router.push('/login')`: depois do logout
+precisamos de uma navegação completa (novo request ao servidor), não uma
+troca client-side de rota — o objetivo é que o próximo carregamento de
+página já veja a sessão removida.
 
 ### Redirect
 
@@ -126,9 +136,11 @@ return <DashboardClient />; // ou <MapaCalorClient />
    Superadmin, adaptado pro path novo).
 2. Clicar em "Sair" no `NavShell` dispara `fetch('/api/auth/logout',
    {method: 'POST'})`.
-3. (Redirect pós-logout não é asserido no teste — mesma limitação de
-   `jsdom` já aceita nas páginas de login, S7/2026-07-06 — a asserção do
-   `fetch` já cobre a lógica do botão.)
+3. O teste cobre apenas o disparo do `fetch()`. A navegação via
+   `window.location.href` não é asserida — limitação conhecida do ambiente
+   de testes (`jsdom` não navega de verdade), mesmo precedente já aceito
+   nas páginas de login (`/superadmin/login`, S7, e `/login` de campanha,
+   fatia própria).
 
 ### Redirect
 
