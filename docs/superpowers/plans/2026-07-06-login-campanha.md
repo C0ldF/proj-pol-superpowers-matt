@@ -44,47 +44,12 @@ desabilitado durante a requisição.
   subdomínio) — sempre a mesma mensagem genérica
   `"CPF/e-mail ou senha inválidos"`.
 - `web/app/superadmin/login/page.tsx` (S7) — página de referência
-  estrutural: client component, dois inputs controlados, `fetch` POST,
-  `role="alert"` no erro, `window.location.href` no sucesso. Corpo atual
-  completo:
-  ```tsx
-  'use client';
-  import { useState } from 'react';
-
-  export default function SuperadminLoginPage() {
-    const [email, setEmail] = useState('');
-    const [senha, setSenha] = useState('');
-    const [erro, setErro] = useState<string | null>(null);
-
-    async function entrar(e: React.FormEvent) {
-      e.preventDefault();
-      setErro(null);
-      const res = await fetch('/api/superadmin/login', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email, senha }),
-      });
-      if (!res.ok) {
-        const body = await res.json();
-        setErro(body.erro ?? 'Não foi possível entrar.');
-        return;
-      }
-      window.location.href = '/superadmin/dashboard';
-    }
-
-    return (
-      <form onSubmit={entrar}>
-        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="E-mail" />
-        <input type="password" value={senha} onChange={(e) => setSenha(e.target.value)} placeholder="Senha" />
-        <button type="submit">Entrar</button>
-        {erro && <p role="alert">{erro}</p>}
-      </form>
-    );
-  }
-  ```
-  A página desta fatia diverge dela em 3 pontos: campo único
-  "CPF ou e-mail" (não e-mail-only), `try/catch` ao redor do `fetch`, e
-  botão desabilitado durante a requisição.
+  estrutural: `'use client'`, dois `useState` (campo + senha) + um
+  `useState` pro `erro`, `<form onSubmit>`, `fetch` POST, erro em
+  `<p role="alert">`, redirect via `window.location.href` no sucesso. Ela
+  **não** trata erro de rede (sem `try/catch` ao redor do `fetch`) e **não**
+  desabilita o botão durante a requisição — as duas melhorias desta fatia
+  (decisões 5 e 9 do spec).
 
 ---
 
@@ -108,9 +73,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import LoginPage from './page';
 
+function fakeResponse(body: unknown, ok = true) {
+  return { ok, json: async () => body } as Response;
+}
+
+function fakeResponseThatFailsToParse(ok = false) {
+  return {
+    ok,
+    json: async () => {
+      throw new Error('invalid json');
+    },
+  } as Response;
+}
+
 describe('/login page', () => {
   beforeEach(() => {
-    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) })) as never;
+    globalThis.fetch = vi.fn(async () => fakeResponse({ ok: true })) as never;
   });
 
   it('envia identificador e senha pro endpoint de login', async () => {
@@ -129,10 +107,7 @@ describe('/login page', () => {
   });
 
   it('mostra a mensagem de erro do servidor quando o login falha', async () => {
-    globalThis.fetch = vi.fn(async () => ({
-      ok: false,
-      json: async () => ({ erro: 'CPF/e-mail ou senha inválidos' }),
-    })) as never;
+    globalThis.fetch = vi.fn(async () => fakeResponse({ erro: 'CPF/e-mail ou senha inválidos' }, false)) as never;
     render(<LoginPage />);
     fireEvent.change(screen.getByPlaceholderText('CPF ou e-mail'), { target: { value: 'user@campanha.com' } });
     fireEvent.change(screen.getByPlaceholderText('Senha'), { target: { value: 'errada' } });
@@ -144,10 +119,7 @@ describe('/login page', () => {
   });
 
   it('usa mensagem genérica quando a resposta de erro não tem body.erro', async () => {
-    globalThis.fetch = vi.fn(async () => ({
-      ok: false,
-      json: async () => ({}),
-    })) as never;
+    globalThis.fetch = vi.fn(async () => fakeResponse({}, false)) as never;
     render(<LoginPage />);
     fireEvent.change(screen.getByPlaceholderText('CPF ou e-mail'), { target: { value: 'user@campanha.com' } });
     fireEvent.change(screen.getByPlaceholderText('Senha'), { target: { value: 'errada' } });
@@ -172,11 +144,24 @@ describe('/login page', () => {
     });
   });
 
+  it('usa mensagem genérica e reabilita o botão quando res.json() falha (resposta sem JSON válido)', async () => {
+    globalThis.fetch = vi.fn(async () => fakeResponseThatFailsToParse()) as never;
+    render(<LoginPage />);
+    fireEvent.change(screen.getByPlaceholderText('CPF ou e-mail'), { target: { value: 'user@campanha.com' } });
+    fireEvent.change(screen.getByPlaceholderText('Senha'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByText('Entrar'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível entrar.');
+      expect(screen.getByText('Entrar')).not.toBeDisabled();
+    });
+  });
+
   it('desabilita o botão durante a requisição e reabilita após erro', async () => {
-    let resolveFetch: (value: unknown) => void;
+    let resolveFetch: (value: Response) => void;
     globalThis.fetch = vi.fn(
       () =>
-        new Promise((resolve) => {
+        new Promise<Response>((resolve) => {
           resolveFetch = resolve;
         }),
     ) as never;
@@ -189,7 +174,7 @@ describe('/login page', () => {
       expect(screen.getByText('Entrar')).toBeDisabled();
     });
 
-    resolveFetch!({ ok: false, json: async () => ({ erro: 'falhou' }) });
+    resolveFetch!(fakeResponse({ erro: 'falhou' }, false));
 
     await waitFor(() => {
       expect(screen.getByText('Entrar')).not.toBeDisabled();
@@ -197,10 +182,7 @@ describe('/login page', () => {
   });
 
   it('uma nova submissão limpa a mensagem de erro anterior antes da nova requisição concluir', async () => {
-    globalThis.fetch = vi.fn(async () => ({
-      ok: false,
-      json: async () => ({ erro: 'primeiro erro' }),
-    })) as never;
+    globalThis.fetch = vi.fn(async () => fakeResponse({ erro: 'primeiro erro' }, false)) as never;
     render(<LoginPage />);
     fireEvent.change(screen.getByPlaceholderText('CPF ou e-mail'), { target: { value: 'user@campanha.com' } });
     fireEvent.change(screen.getByPlaceholderText('Senha'), { target: { value: 'errada' } });
@@ -209,10 +191,10 @@ describe('/login page', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('primeiro erro');
     });
 
-    let resolveFetch: (value: unknown) => void;
+    let resolveFetch: (value: Response) => void;
     globalThis.fetch = vi.fn(
       () =>
-        new Promise((resolve) => {
+        new Promise<Response>((resolve) => {
           resolveFetch = resolve;
         }),
     ) as never;
@@ -221,7 +203,7 @@ describe('/login page', () => {
     // Antes da 2ª requisição concluir, o alerta antigo já deve ter sumido.
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
-    resolveFetch!({ ok: false, json: async () => ({ erro: 'segundo erro' }) });
+    resolveFetch!(fakeResponse({ erro: 'segundo erro' }, false));
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('segundo erro');
     });
@@ -259,15 +241,19 @@ export default function LoginPage() {
       });
       if (res.ok) {
         window.location.href = '/dashboard';
-        return;
+        return; // fica desabilitado — a página já está navegando embora
       }
-      const body = await res.json();
+      let body: { erro?: string } = {};
+      try {
+        body = await res.json();
+      } catch {
+        // resposta de erro sem JSON válido — cai no fallback abaixo
+      }
       setErro(body.erro ?? 'Não foi possível entrar.');
     } catch {
-      setErro('Não foi possível entrar.');
-    } finally {
-      setEnviando(false);
+      setErro('Não foi possível entrar.'); // fetch rejeitou (falha de rede)
     }
+    setEnviando(false);
   }
 
   return (
@@ -293,7 +279,7 @@ export default function LoginPage() {
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/login/page.test.tsx`
-Expected: PASS — 6/6
+Expected: PASS — 7/7
 
 - [ ] **Step 5: Rodar a suíte inteira do projeto**
 
@@ -320,13 +306,14 @@ testes 2-3; decisão 5 (erro de rede/parse com try/catch) → Task 1 teste 4;
 decisão 6 (subdomínio invisível pra página) → Task 1 Step 3 (nenhuma
 referência a subdomínio no componente); decisão 7 (redirect `/dashboard`) →
 Task 1 Step 3; decisão 8 (sem estilo) → Task 1 Step 3 (HTML puro, sem
-classes/CSS); decisão 9 (botão desabilitado) → Task 1 teste 5. Os 5 itens
-de teste do spec → cobertos pelos 6 testes da Task 1 (o teste de erro de
-rede é um item extra que a lista do spec não numerou explicitamente, mas a
-decisão 5 exige o comportamento — adicionado aqui pra fechar a lacuna).
-Não-objetivos: nenhuma task cria `POST /api/auth/logout`, mexe em
-`/dashboard`/`/mapa-calor`, adiciona máscara de CPF, ou adiciona CSS —
-confirmado por omissão.
+classes/CSS); decisão 9 (botão desabilitado) → Task 1 teste 6. Os 5 itens
+de teste do spec → cobertos pelos 7 testes da Task 1 (2 itens extras que a
+lista do spec não numerou explicitamente, mas as decisões 4-5 exigem o
+comportamento: erro de rede — `fetch` rejeitando — e erro de parse —
+`res.json()` rejeitando — são caminhos distintos e ambos testados
+separadamente). Não-objetivos: nenhuma task cria `POST /api/auth/logout`,
+mexe em `/dashboard`/`/mapa-calor`, adiciona máscara de CPF, ou adiciona
+CSS — confirmado por omissão.
 
 **2. Placeholder scan:** nenhum "TBD"/"similar à Task N sem código". Toda
 task tem código completo (teste + implementação).
