@@ -626,7 +626,22 @@ páginas de auth do projeto.
   simples (`delete window.location; window.location = { href: '' }`) antes
   de cada teste. Sem isso, a asserção falha silenciosamente comparando
   contra a URL default do `jsdom` (`http://localhost:3000/`), não contra
-  `'/login'` — confirmado empiricamente nesta sessão.
+  `'/login'` — confirmado empiricamente nesta sessão. **Duas alternativas
+  foram cogitadas e descartadas por evidência, não por preferência:**
+  `vi.spyOn(window.location, 'assign')` (sem substituir o objeto inteiro)
+  lança `TypeError: Cannot redefine property: assign` neste `jsdom`
+  (`^29.1.1`, confirmado empiricamente) — `assign` é não-configurável no
+  objeto `Location` real, ainda que `window.location` (a propriedade em
+  `window`) seja configurável e o `delete`/reatribuição funcionem sem
+  erro. Encapsular a navegação numa função própria testável via mock de
+  módulo foi cogitado e descartado por escopo: nenhuma outra página deste
+  projeto (`/login`, `/superadmin/login`, `/superadmin/dashboard`) faz
+  isso — todas chamam `window.location.href = ...` direto e não testam a
+  navegação (só o `fetch`), e mudar esse padrão pra uma função só afetaria
+  esta task sem motivo forte. Se o `jsdom`/Vitest for atualizado no
+  futuro e o `delete`+reatribuição parar de funcionar, comece
+  reconferindo esta nota antes de tentar `spyOn(assign)` de novo — já
+  falhou uma vez.
 - `redirect()` (de `next/navigation`) funciona lançando uma exceção por
   design do Next — qualquer teste de página protegida (Task 2) precisa
   mockar `redirect` pra também lançar, senão o teste passa mesmo que a
