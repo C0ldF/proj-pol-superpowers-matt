@@ -82,4 +82,52 @@ describe('DashboardSuperadminClient', () => {
       expect(screen.getByRole('alert')).toHaveTextContent(/não foi possível/i);
     });
   });
+
+  it('mostra erro e libera o checkbox quando o POST de módulo falha por rede (fetch rejeita)', async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      if (url === '/api/superadmin/campanhas') {
+        return { ok: true, json: async () => mockCampanhas } as Response;
+      }
+      if (url === '/api/superadmin/modulos') {
+        throw new Error('network error');
+      }
+      throw new Error(`fetch inesperado: ${url}`);
+    }) as never;
+
+    render(<DashboardSuperadminClient />);
+    const checkboxIa = await screen.findByRole('checkbox', { name: 'ia' });
+    fireEvent.click(checkboxIa);
+
+    // enquanto a requisição está pendente, o checkbox fica desabilitado (UI otimista/pessimista)
+    expect(checkboxIa).toBeDisabled();
+
+    // após a falha, o erro deve ser exibido via o mecanismo de alerta já existente
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/não foi possível/i);
+    });
+
+    // o checkbox não deve permanecer travado indefinidamente: o estado de carregamento é limpo
+    // (o alerta substitui a tabela, então não há mais um checkbox "travado" na tela)
+    expect(screen.queryByRole('checkbox', { name: 'ia' })).not.toBeInTheDocument();
+  });
+
+  it('mostra erro quando o POST de módulo responde com falha (res.ok === false)', async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      if (url === '/api/superadmin/campanhas') {
+        return { ok: true, json: async () => mockCampanhas } as Response;
+      }
+      if (url === '/api/superadmin/modulos') {
+        return { ok: false, json: async () => ({}) } as Response;
+      }
+      throw new Error(`fetch inesperado: ${url}`);
+    }) as never;
+
+    render(<DashboardSuperadminClient />);
+    const checkboxIa = await screen.findByRole('checkbox', { name: 'ia' });
+    fireEvent.click(checkboxIa);
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/não foi possível/i);
+    });
+  });
 });

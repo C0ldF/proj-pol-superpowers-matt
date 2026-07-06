@@ -37,26 +37,33 @@ export function DashboardSuperadminClient() {
     const chave = `${campanha.id}:${modulo}`;
     setCarregando(chave);
     const acao = habilitado ? 'desabilitar' : 'habilitar';
-    const res = await fetch('/api/superadmin/modulos', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ campanhaId: campanha.id, modulo, acao }),
-    });
-    if (res.ok) {
-      setCampanhas((atual) =>
-        (atual ?? []).map((c) =>
-          c.id === campanha.id
-            ? {
-                ...c,
-                modulos_habilitados: habilitado
-                  ? c.modulos_habilitados.filter((m) => m !== modulo)
-                  : [...c.modulos_habilitados, modulo],
-              }
-            : c,
-        ),
-      );
+    try {
+      const res = await fetch('/api/superadmin/modulos', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ campanhaId: campanha.id, modulo, acao }),
+      });
+      if (res.ok) {
+        setCampanhas((atual) =>
+          (atual ?? []).map((c) =>
+            c.id === campanha.id
+              ? {
+                  ...c,
+                  modulos_habilitados: habilitado
+                    ? c.modulos_habilitados.filter((m) => m !== modulo)
+                    : [...c.modulos_habilitados, modulo],
+                }
+              : c,
+          ),
+        );
+      } else {
+        setErro('Não foi possível atualizar o módulo.');
+      }
+    } catch {
+      setErro('Não foi possível atualizar o módulo.');
+    } finally {
+      setCarregando(null);
     }
-    setCarregando(null);
   }
 
   async function sair() {
