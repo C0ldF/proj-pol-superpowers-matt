@@ -36,19 +36,32 @@ Duas peças pequenas e independentes:
    conseguir sair. `POST /api/auth/logout` sempre chama `signOut()` e
    sempre retorna `200 {ok:true}`, sem gate nenhum antes.
 4. **Botão "Sair" dentro do `NavShell`.** Único component compartilhado por
-   `/dashboard` e `/mapa-calor` — um botão só cobre as duas telas. `NavShell`
-   continua sendo usado só dentro de `DashboardClient`/`MapaCalorClient`,
-   que já são Client Components — não há necessidade de criar um wrapper
-   novo, nem de marcar `NavShell` com `'use client'` própria, só pra este
-   botão.
+   `/dashboard` e `/mapa-calor` — um botão só cobre as duas telas. Verificado
+   contra `web/node_modules/next/dist/docs/01-app/01-getting-started/
+   05-server-and-client-components.md:176` ("Once a file is marked with
+   'use client', all of its imports and the components it directly renders
+   are included in the client bundle... you don't need to add the
+   directive to every component") e contra o código atual —
+   `web/app/components/NavShell.tsx` hoje não tem `'use client'`, e é
+   importado e renderizado diretamente só por `DashboardClient`/
+   `MapaCalorClient` (ambos `'use client'`). Não há necessidade de criar um
+   wrapper novo nem de marcar `NavShell` com `'use client'` própria, só pra
+   este botão — mas isso é uma propriedade do código atual, não uma decisão
+   arquitetural; se algum dia `NavShell` passar a ser importado também por
+   um Server Component direto (fora da árvore client), essa premissa cai e
+   precisa ser reavaliada.
 5. **Logout: redireciona sempre, mesmo se o `fetch` falhar.** Diferente da
    página `/login` (que trata erro de rede como melhoria deliberada sobre o
    precedente, mostrando mensagem pro usuário), aqui não há formulário nem
    estado de erro — clicar em "Sair" deve levar pro `/login` de qualquer
    jeito (offline, timeout, o que for), porque ficar preso na tela
-   autenticada é pior do que uma tentativa de logout que talvez não tenha
-   limpado a sessão no servidor (o próximo request sem sessão válida
-   redireciona de novo de qualquer forma). Implementação:
+   autenticada é pior do que a incerteza sobre se a sessão foi de fato
+   limpa no servidor. Se a sessão foi removida, o próximo request cai no
+   redirect da decisão 6 normalmente; se não foi (o `fetch` falhou antes de
+   chegar no servidor), o usuário simplesmente vê a tela de login e pode
+   tentar sair de novo mais tarde — não há garantia de que o logout
+   realmente aconteceu, só de que a navegação não fica travada esperando
+   por ele. Implementação:
    `await fetch(...).catch(() => {})` antes do `window.location.href` —
    o `.catch` vazio garante que uma rejeição da Promise não impede a
    navegação. O botão "Sair" do Superadmin (S7) tem exatamente essa mesma
