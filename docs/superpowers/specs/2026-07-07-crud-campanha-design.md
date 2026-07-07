@@ -43,12 +43,12 @@ futura, decisão do usuário ao escolher o escopo desta.
    antes de chamar a função SQL.
 3. **`cargo`/`abrangencia`/`status` como listas fechadas em TS, mesmo
    padrão de `web/lib/modulos.ts` (S6).** Novo arquivo `web/lib/campanha.ts`
-   exporta `CARGOS`/`ABRANGENCIAS` + `isCargo`/`isAbrangencia`, e
-   `web/lib/campanha/transicionar-status.ts` exporta `STATUS_CAMPANHA` +
-   `isStatusCampanha` — únicas fontes da verdade no TS, refletindo os enums
-   Postgres `cargo`/`abrangencia`/`campanha_status` (migration `0002`).
-   Requests com valor fora da lista são rejeitados em TS (400) antes de
-   tocar o banco, sem `includes(...)` solto espalhado pelas rotas.
+   exporta `CARGOS`/`ABRANGENCIAS`/`STATUS_CAMPANHA` +
+   `isCargo`/`isAbrangencia`/`isStatusCampanha` — únicas fontes da verdade
+   no TS, refletindo os enums Postgres `cargo`/`abrangencia`/
+   `campanha_status` (migration `0002`). Requests com valor fora da lista
+   são rejeitados em TS (400) antes de tocar o banco, sem `includes(...)`
+   solto espalhado pelas rotas.
 4. **Sucesso da criação retorna a linha criada (`201`), não só
    `{ok:true}`.** Diferente de `POST /api/superadmin/modulos` (que só
    precisa confirmar sucesso — o cliente já tem a lista completa em
@@ -115,10 +115,17 @@ futura, decisão do usuário ao escolher o escopo desta.
     representando o mesmo estado. O valor gravado no banco é sempre a
     versão normalizada.
 13. **`dataEleicao`: valida formato `YYYY-MM-DD` e que representa uma data
-    real.** Regex `^\d{4}-\d{2}-\d{2}$` mais `!Number.isNaN(Date.parse(...))`
-    — rejeita string vazia, formato errado (`"10/01/2028"`), ou uma data
-    sintaticamente válida mas impossível (`"2028-02-30"`). 400 se falhar
-    em qualquer uma das duas checagens.
+    real, sem confiar em `Date.parse()` sozinho.** `Date.parse()`/
+    `new Date(...)` normalizam datas impossíveis em vez de rejeitar —
+    `Date.parse('2028-02-30')` retorna um timestamp válido correspondente a
+    `2028-03-01`, não `NaN` (confirmado empiricamente em Node). A validação
+    correta é: regex `^(\d{4})-(\d{2})-(\d{2})$` captura os componentes,
+    constrói `new Date(`${s}T00:00:00.000Z`)`, e compara
+    `getUTCFullYear()`/`getUTCMonth()+1`/`getUTCDate()` de volta contra os
+    números capturados — se algum não bater, a data não existe (rejeita
+    `"2028-02-30"`, aceita `"2028-02-29"` em ano bissexto e rejeita em ano
+    não-bissexto). Rejeita também string vazia e formato errado
+    (`"10/01/2028"`), que já falham na regex antes de chegar no `Date`.
 14. **`POST /api/superadmin/campanhas/status` também retorna a linha
     atualizada (`200 {campanha}`), não só `{ok:true}`.** Mesmo raciocínio
     da decisão 4: o cliente já tem a campanha em memória, mas
@@ -164,14 +171,22 @@ isCargo(value: string): value is Cargo
 ABRANGENCIAS = ['municipal', 'estadual'] as const
 Abrangencia = (typeof ABRANGENCIAS)[number]
 isAbrangencia(value: string): value is Abrangencia
+
+STATUS_CAMPANHA = ['ativa', 'suspensa', 'encerrada'] as const
+StatusCampanha = (typeof STATUS_CAMPANHA)[number]
+isStatusCampanha(value: string): value is StatusCampanha
 ```
+
+Todas as 3 constantes de domínio (`CARGOS`/`ABRANGENCIAS`/`STATUS_CAMPANHA`)
+e seus type guards vivem juntos em `campanha.ts` — uma única fonte de
+constantes do domínio `campanha`, em vez de espalhadas entre esse arquivo e
+`transicionar-status.ts`. Organização que escala melhor se surgirem outras
+regras envolvendo `StatusCampanha` no futuro.
 
 ### `web/lib/campanha/transicionar-status.ts`
 
 ```
-STATUS_CAMPANHA = ['ativa', 'suspensa', 'encerrada'] as const
-StatusCampanha = (typeof STATUS_CAMPANHA)[number]
-isStatusCampanha(value: string): value is StatusCampanha
+import { type StatusCampanha } from '../campanha';
 
 transicionarStatus(atual: StatusCampanha, novo: StatusCampanha):
   | { valida: true; update: { status: StatusCampanha; suspensa_em?: string | null } }
@@ -200,7 +215,10 @@ Regras:
            abrangencia==='estadual'  → uf presente e municipioId ausente
            — 400 se não (mensagem explica qual campo esperado)
 7. se abrangencia==='estadual': uf = uf.trim().toUpperCase(); valida ^[A-Z]{2}$ — 400 se não
-8. valida: dataEleicao bate ^\d{4}-\d{2}-\d{2}$ E Date.parse(dataEleicao) não é NaN — 400 se não
+8. valida: dataEleicao bate ^\d{4}-\d{2}-\d{2}$ E os componentes capturados
+   batem com getUTCFullYear/getUTCMonth+1/getUTCDate de
+   new Date(`${dataEleicao}T00:00:00.000Z`) — 400 se não (ver decisão 13,
+   Date.parse() sozinho normaliza datas impossíveis em vez de rejeitar)
 9. adminClient().from('campanha').insert({...}).select().single()
 10. erro de unicidade (subdominio duplicado) → 400 {erro: 'subdomínio já em uso'}
     outro erro de banco → 400 {erro: error.message}
