@@ -100,14 +100,17 @@ futura, decisão do usuário ao escolher o escopo desta.
     reforça visualmente que é terminal). Mesmo padrão pessimista do toggle
     de módulo (S7): botão desabilitado durante a requisição, UI só reflete
     o novo estado depois do `200`.
-11. **`subdominio`: valida formato antes de tentar o `insert`, não só
-    unicidade.** Sem essa validação o banco aceitaria qualquer string como
-    `subdominio` (é só `text unique`, sem `CHECK` de formato) — mas
-    `web/middleware.ts` extrai subdomínios de host reais (`extractSubdomain`,
-    `web/lib/subdomain.ts`), então um valor com espaço, maiúscula ou
-    pontuação nunca resolveria de volta pra essa campanha. Regex
-    `^[a-z0-9-]+$`, tamanho entre 3 e 63 caracteres (limite de label DNS) —
-    400 se não bater, com a mesma mensagem de "formato inválido".
+11. **`subdominio`: normaliza (`trim()` + `toLowerCase()`) e valida formato
+    antes de tentar o `insert`, não só unicidade.** Sem validação o banco
+    aceitaria qualquer string (é só `text unique`, sem `CHECK` de formato)
+    — mas `web/middleware.ts` extrai subdomínios de host reais
+    (`extractSubdomain`, `web/lib/subdomain.ts`), então um valor com
+    espaço, maiúscula ou pontuação nunca resolveria de volta pra essa
+    campanha. Normaliza primeiro (mesma lógica da decisão 12 pra `uf` —
+    subdomínio é case-insensitive na prática, "ABC" e "abc" resolvem pro
+    mesmo host) e só depois valida `^[a-z0-9-]+$`, tamanho entre 3 e 63
+    caracteres (limite de label DNS) — 400 se não bater. O valor gravado é
+    sempre o normalizado.
 12. **`uf`: normaliza antes de validar/gravar.** `trim()` +
     `toUpperCase()` primeiro, depois valida que restam exatamente 2 letras
     (`^[A-Z]{2}$`) — sem isso, `"ma"`, `"Ma"`, `" MA"` e `"MA"` seriam
@@ -116,16 +119,11 @@ futura, decisão do usuário ao escolher o escopo desta.
     versão normalizada.
 13. **`dataEleicao`: valida formato `YYYY-MM-DD` e que representa uma data
     real, sem confiar em `Date.parse()` sozinho.** `Date.parse()`/
-    `new Date(...)` normalizam datas impossíveis em vez de rejeitar —
-    `Date.parse('2028-02-30')` retorna um timestamp válido correspondente a
-    `2028-03-01`, não `NaN` (confirmado empiricamente em Node). A validação
-    correta é: regex `^(\d{4})-(\d{2})-(\d{2})$` captura os componentes,
-    constrói `new Date(`${s}T00:00:00.000Z`)`, e compara
-    `getUTCFullYear()`/`getUTCMonth()+1`/`getUTCDate()` de volta contra os
-    números capturados — se algum não bater, a data não existe (rejeita
-    `"2028-02-30"`, aceita `"2028-02-29"` em ano bissexto e rejeita em ano
-    não-bissexto). Rejeita também string vazia e formato errado
-    (`"10/01/2028"`), que já falham na regex antes de chegar no `Date`.
+    `new Date()` normalizam datas inválidas em vez de rejeitá-las. A
+    validação compara os componentes (ano, mês, dia) extraídos da string
+    com os componentes UTC da data construída, garantindo que a data
+    exista de fato — rejeita `"2028-02-30"`, string vazia, e formato
+    errado (`"10/01/2028"`).
 14. **`POST /api/superadmin/campanhas/status` também retorna a linha
     atualizada (`200 {campanha}`), não só `{ok:true}`.** Mesmo raciocínio
     da decisão 4: o cliente já tem a campanha em memória, mas
@@ -209,7 +207,7 @@ Regras:
 1. bloqueado = await requireSuperadmin(); se bloqueado, retorna
 2. body: {subdominio, nome, cargo, abrangencia, municipioId?, uf?, dataEleicao}
 3. valida: todos os campos obrigatórios presentes — 400 se não
-4. valida: subdominio bate ^[a-z0-9-]+$, tamanho 3-63 — 400 se não
+4. subdominio = subdominio.trim().toLowerCase(); valida ^[a-z0-9-]+$, tamanho 3-63 — 400 se não
 5. valida: isCargo(cargo), isAbrangencia(abrangencia) — 400 se não
 6. valida: abrangencia==='municipal' → municipioId presente e uf ausente
            abrangencia==='estadual'  → uf presente e municipioId ausente
@@ -281,9 +279,11 @@ Regras:
 7. 401/403 mesma regra de `requireSuperadmin()` (já testado em outras
    rotas do painel, S7).
 8. 400 com campo obrigatório faltando, sem chamar `insert`.
-9. 400 com `subdominio` fora do formato (`"Meu Site"`, `"ABC"`,
-   `"teste!!!"`, string com menos de 3 ou mais de 63 caracteres), sem
-   chamar `insert`.
+9. `subdominio` é normalizado antes de gravar: `"ABC"` vira `"abc"` no
+   `insert` (teste de sucesso que confirma o valor enviado). 400 com
+   `subdominio` fora do formato mesmo após normalizar (`"Meu Site"` —
+   espaço não some ao normalizar —, `"teste!!!"`, string com menos de 3 ou
+   mais de 63 caracteres), sem chamar `insert`.
 10. 400 com `cargo`/`abrangencia` fora da lista fechada, sem chamar
     `insert`.
 11. 400 com `abrangencia='municipal'` e `municipioId` ausente (ou `uf`
@@ -292,7 +292,11 @@ Regras:
     (teste de sucesso que confirma o valor enviado ao `insert`); `uf` com
     formato inválido depois de normalizada (ex.: `"M4"`, `"MAS"`) → 400.
 13. 400 com `dataEleicao` vazia, em formato errado (`"10/01/2028"`), ou
-    sintaticamente válida mas impossível (`"2028-02-30"`).
+    sintaticamente válida mas impossível (`"2028-02-30"`, e
+    `"2027-02-29"` — 2027 não é bissexto, o caso clássico que quebra
+    validações de data ingênuas). 201 com `"2028-02-29"` (2028 é
+    bissexto) — confirma que a validação não rejeita datas válidas de
+    ano bissexto.
 14. 400 com `subdominio` duplicado (constraint de unicidade simulada no
     mock), sem vazar o erro cru do Postgres.
 15. 201 com a linha criada em caso de sucesso.
