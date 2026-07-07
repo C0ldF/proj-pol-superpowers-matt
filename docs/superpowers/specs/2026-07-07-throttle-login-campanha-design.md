@@ -41,13 +41,18 @@ melhoria maior, fora desta fatia — ver Não-objetivos.
    cru gravado no `audit_log`. Para e-mail, a chave é o e-mail já
    normalizado (`trim().toLowerCase()`, mesma normalização que
    `loginCampanha` já faz hoje pro caminho de e-mail direto).
-3. **Limiar: 5 falhas em 15 minutos → bloqueia por 15 minutos.** Padrão
-   comum de mercado — poucas falhas legítimas (usuário errou a senha 2-3
-   vezes) nunca disparam; automação de brute-force esbarra rápido. Como é
-   janela deslizante (decisão 1), "bloqueia por 15 minutos" na prática
-   significa: a partir da 5ª falha, toda tentativa nos 15 minutos
-   seguintes é rejeitada sem sequer chamar o Supabase Auth — o bloqueio
-   "expira" sozinho conforme as falhas mais antigas saem da janela.
+3. **Limiar: 5 falhas em 15 minutos.** Padrão comum de mercado — poucas
+   falhas legítimas (usuário errou a senha 2-3 vezes) nunca disparam;
+   automação de brute-force esbarra rápido. Como é janela deslizante
+   (decisão 1), "bloqueia por 15 minutos" não é matematicamente exato — o
+   comportamento real é: a conta permanece bloqueada **enquanto existirem
+   pelo menos `LIMITE_FALHAS` registros de `login.falha` dentro da janela
+   deslizante** pra aquela chave/campanha. Se as 5 falhas aconteceram
+   espaçadas (ex.: `12:00`, `12:01`, `12:02`, `12:03`, `12:14`), o
+   desbloqueio não acontece exatamente 15 minutos depois da 5ª falha — vai
+   depender de quando cada falha individual sai da janela. Na prática,
+   pra falhas concentradas num curto intervalo (o caso comum de
+   brute-force automatizado), a diferença é irrelevante.
 4. **Checagem acontece antes de qualquer resolução de CPF ou chamada ao
    Supabase Auth.** A chave do identificador é calculada logo no início de
    `loginCampanha`, e a contagem de falhas é a primeira coisa checada —
@@ -84,6 +89,26 @@ melhoria maior, fora desta fatia — ver Não-objetivos.
    `web/lib/auth/login.ts`**, não hardcoded inline — mesmo padrão de
    `MODULOS`/`CARGOS` (constantes nomeadas, não números soltos), e permite
    um teste futuro ajustar/inspecionar o valor sem duplicar o literal.
+9. **Corrida entre contagem e registro é aceita, não corrigida.** O fluxo é
+   `contar → decidir → (tentar login) → registrar falha`, sem transação
+   nem lock cobrindo as duas pontas — duas requisições concorrentes podem
+   ambas ler a contagem `4` (abaixo do limiar) e ambas prosseguir,
+   resultando em mais de `LIMITE_FALHAS` falhas registradas antes de
+   qualquer uma delas ver o bloqueio. Isso é aceito deliberadamente: o
+   objetivo é mitigar brute-force (reduzir a taxa de tentativas possíveis
+   a um patamar impraticável), não contabilidade exata. Login de campanha
+   não é um fluxo de alta concorrência por identificador (é uma pessoa
+   tentando entrar, não um sistema disparando requisições paralelas
+   legítimas) — uma pequena ultrapassagem ocasional sob concorrência não
+   compromete o objetivo. Não introduzir lock/`SERIALIZABLE` pra fechar
+   essa corrida — custo de complexidade desproporcional ao ganho.
+10. **Índice composto na migration, não deixado pra depois.** A consulta de
+    `contar_falhas_login_recentes` filtra por `campanha_id` + `acao` +
+    `identificador_chave` (dentro do jsonb) + intervalo de `criado_em` — sem
+    índice, vira scan sequencial do `audit_log` inteiro a cada tentativa de
+    login, e esse log só cresce (é append-only, todo evento de toda
+    campanha desde o S1). O índice entra na mesma migration desta fatia,
+    não como um "otimizar depois" — ver Schema/Funções.
 
 ## Não-objetivos
 
@@ -105,10 +130,21 @@ melhoria maior, fora desta fatia — ver Não-objetivos.
 Uma migration nova.
 
 ```sql
+-- Índice composto: cobre exatamente o WHERE de contar_falhas_login_recentes
+-- (igualdade em campanha_id/acao/identificador_chave, intervalo em criado_em).
+-- Entra desde já, não como otimização futura — audit_log é append-only e só
+-- cresce (todo evento de toda campanha desde o S1).
+CREATE INDEX audit_log_login_falha_idx ON public.audit_log (
+  campanha_id,
+  acao,
+  (depois->>'identificador_chave'),
+  criado_em DESC
+);
+
 -- contar_falhas_login_recentes
 CREATE OR REPLACE FUNCTION public.contar_falhas_login_recentes(
   p_campanha_id uuid,
-  p_chave text,
+  p_identificador_chave text,
   p_janela_minutos int
 )
 RETURNS bigint
@@ -118,7 +154,7 @@ AS $$
   FROM public.audit_log
   WHERE campanha_id = p_campanha_id
     AND acao = 'login.falha'
-    AND depois->>'identificador_chave' = p_chave
+    AND depois->>'identificador_chave' = p_identificador_chave
     AND criado_em > now() - (p_janela_minutos || ' minutes')::interval;
 $$;
 
@@ -133,36 +169,63 @@ passado por `loginCampanha` ganha a chave nova `identificador_chave` nos
 casos de falha, e as chamadas de bloqueio usam `p_acao = 'login.bloqueado'`
 em vez de `'login.falha'`.
 
+**Nota de escala:** `identificador_chave` fica dentro do jsonb `depois`
+(não uma coluna própria) porque o volume esperado é baixo (auditoria de
+login, não um evento de alta frequência) e isso evita alterar o schema
+principal do `audit_log` só pra esta fatia — decisão consciente, não
+descuido. Se o volume crescer a ponto do jsonb deixar de ser adequado
+(cenário não esperado no horizonte atual do produto), promover a chave
+pra coluna própria é uma migration separada, sem quebrar nada desta fatia.
+
 ## Camada Next.js
 
 `web/lib/auth/login.ts` — `LoginDeps` ganha um método novo:
 
 ```
-LoginDeps.contarFalhasRecentes(campanhaId: string, chave: string): Promise<number>
+LoginDeps.contarFalhasRecentes(campanhaId: string, identificadorChave: string): Promise<number>
 ```
 
-`loginCampanha` ganha, logo após resolver `campanhaId` e antes de qualquer
-outra coisa:
+`loginCampanha` ganha um passo novo no início, e uma pequena adição em
+todo ponto de saída por falha que já existia. Fluxo completo, na ordem
+exata em que acontece:
 
 ```
-1. chaveIdentificador = ehEmail(identificador)
+1. campanhaId = await deps.campanhaIdPorSubdominio(subdominio)
+   se null: retorna {ok:false}                          [já existia]
+
+2. identificadorChave = ehEmail(identificador)
      ? identificador.trim().toLowerCase()
-     : deps.cpfHmac(normalizarCpf(identificador))
-2. falhasRecentes = await deps.contarFalhasRecentes(campanhaId, chaveIdentificador)
-3. se falhasRecentes >= LIMITE_FALHAS:
-     await deps.registrarEvento('login.bloqueado', campanhaId, { ip, chaveIdentificador })
-     retorna { ok: false }   -- sem chamar resolverEmailPorCpf nem signIn
-4. (resto do fluxo já existente, sem mudança de comportamento)
-   -- toda chamada a `falha(motivo)` existente passa a incluir
-   -- `identificador_chave: chaveIdentificador` no meta, além de `ip`/`motivo`
+     : deps.cpfHmac(normalizarCpf(identificador))         [NOVO]
+
+3. falhasRecentes = await deps.contarFalhasRecentes(
+     campanhaId, identificadorChave)                      [NOVO]
+
+4. se falhasRecentes >= LIMITE_FALHAS:                     [NOVO]
+     await deps.registrarEvento('login.bloqueado', campanhaId,
+       { ip, identificador_chave: identificadorChave })
+     retorna {ok:false}
+     -- pára aqui: NÃO chama resolverEmailPorCpf nem signIn
+
+5. (a partir daqui, fluxo já existente sem mudança de comportamento —
+   só passa a levar identificadorChave já calculado, sem recalcular)
+   - resolve e-mail (via CPF ou direto)
+   - chama deps.signIn(email, senha)
+   - se qualquer passo falhar (cpf_invalido | cpf_nao_encontrado |
+     credenciais | subdominio): chama falha(motivo), que agora
+     registra {ip, motivo, identificador_chave: identificadorChave}
+     em vez de só {ip, motivo}
+   - se signIn suceder: registra 'login.sucesso' (sem identificador_chave,
+     sem mudança aqui — sucesso não participa da contagem de falhas)
 ```
 
 `web/lib/auth/build-login-deps.ts` ganha a wiring real:
 
 ```
-contarFalhasRecentes: async (campanhaId, chave) => {
+contarFalhasRecentes: async (campanhaId, identificadorChave) => {
   const { data } = await admin.rpc('contar_falhas_login_recentes', {
-    p_campanha_id: campanhaId, p_chave: chave, p_janela_minutos: JANELA_MINUTOS,
+    p_campanha_id: campanhaId,
+    p_identificador_chave: identificadorChave,
+    p_janela_minutos: JANELA_MINUTOS,
   });
   return (data as number | null) ?? 0;
 },
@@ -205,12 +268,17 @@ interno.
 10. `get_advisors(type=security)`: zero alertas novos além do padrão já
     aceito (`SECURITY DEFINER` executável por `service_role`, mesma
     categoria das outras funções desta família).
+11. `EXPLAIN ANALYZE` da consulta interna de `contar_falhas_login_recentes`
+    (rodar o `SELECT` do corpo da função diretamente, com valores reais)
+    mostra uso de `audit_log_login_falha_idx` (`Index Scan` ou
+    `Index Only Scan`, não `Seq Scan`) — confirma que o índice da decisão
+    10 está de fato sendo usado, não só criado.
 
 ### End-to-end (via fixture real, execução manual contra o projeto)
 
-11. 5 tentativas com senha errada pro mesmo identificador/campanha,
+12. 5 tentativas com senha errada pro mesmo identificador/campanha,
     seguidas de uma 6ª tentativa com a senha CORRETA: a 6ª ainda falha
     (bloqueado), mesma mensagem genérica.
-12. Esperar a janela expirar (ou ajustar `JANELA_MINUTOS` pra um valor
+13. Esperar a janela expirar (ou ajustar `JANELA_MINUTOS` pra um valor
     pequeno só no teste manual) e tentar de novo com a senha correta:
     sucesso.
