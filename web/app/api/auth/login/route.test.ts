@@ -8,6 +8,7 @@ vi.mock('../../../../lib/auth/build-login-deps', () => ({
     signIn: async () => 'camp-1',
     signOut: async () => {},
     registrarEvento: async () => {},
+    contarFalhasRecentes: async () => 0,
   })),
 }));
 
@@ -57,6 +58,7 @@ describe('POST /api/auth/login', () => {
       signIn: async () => null,
       signOut: async () => {},
       registrarEvento: async () => {},
+      contarFalhasRecentes: async () => 0,
     });
     const res = await POST(req({ identificador: 'gestor@a.com', senha: 'errada' }));
     expect(res.status).toBe(401);
