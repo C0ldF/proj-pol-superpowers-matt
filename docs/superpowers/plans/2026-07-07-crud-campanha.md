@@ -6,19 +6,26 @@
 `execute_sql` manual: criar uma campanha nova, e mudar seu status
 (`ativa`/`suspensa`/`encerrada`).
 
-**Architecture:** Sem migration nova (schema já existe desde S0). Duas
-rotas novas (`POST /api/superadmin/campanhas` adicionada ao arquivo do
-`GET` já existente; `POST /api/superadmin/campanhas/status` nova) mutam
-`public.campanha` direto via `adminClient()` (`service_role`) — sem função
-Postgres nova, o gate de autorização já é o `requireSuperadmin()` de cada
-rota. Uma função pura testável (`transicionarStatus`) encapsula toda a
-máquina de estados e a regra de `suspensa_em`. UI estende o
-`DashboardSuperadminClient` já existente (S7) com um formulário de criação
-e botões de transição de status por linha.
+**Architecture:** Sem migration nova (schema já existe desde S0). Toda
+validação de criação vive numa função pura (`validarNovaCampanha`, própria
+de blocos menores — `subdominioValido`/`ufValida`/`dataEleicaoValida` em
+`validacao.ts`), testável sem HTTP nem banco. A máquina de estados de
+transição também é uma função pura (`transicionarStatus`) que recebe o
+"agora" como parâmetro em vez de chamar `new Date()` internamente —
+verdadeiramente determinística, sem `expect.any(String)` nos testes. As
+rotas (`POST /api/superadmin/campanhas` adicionada ao arquivo do `GET` já
+existente; `POST /api/superadmin/campanhas/status` nova) ficam finas: só
+parseiam o corpo, chamam a função pura correspondente, e traduzem o
+resultado pra HTTP — mutação direta via `adminClient()` (`service_role`),
+sem função Postgres nova, já que o gate de autorização é o
+`requireSuperadmin()` de cada rota. UI estende o `DashboardSuperadminClient`
+(S7) com um formulário de criação (sucesso insere a linha localmente, sem
+refetch — decisão deliberada, mesmo raciocínio já usado pelo toggle de
+módulo do S7: a resposta da API já contém tudo que a UI precisa saber) e
+botões de transição de status por linha.
 
 **Tech Stack:** Next.js 16.2.9 (App Router), React 19, TypeScript, Vitest +
-`jsdom`/`@testing-library/react`, `execute_sql` via MCP Supabase (só pra
-inspecionar, nenhuma migration nesta fatia).
+`jsdom`/`@testing-library/react`.
 
 ## Global Constraints
 
@@ -26,9 +33,25 @@ inspecionar, nenhuma migration nesta fatia).
   (Next.js 16.2.9 tem breaking changes — regra do `web/AGENTS.md`).
 - Spec de referência: `docs/superpowers/specs/2026-07-07-crud-campanha-design.md`.
 - **Nenhuma migration nova** — `public.campanha` já tem todas as colunas
-  necessárias (`supabase/migrations/0002_campanha.sql`).
+  necessárias (`supabase/migrations/0002_campanha.sql`). Confirmado nesta
+  sessão: não existe trigger nenhum em `campanha` mantendo `atualizado_em`
+  automaticamente (só `default now()` no `INSERT`) — a atribuição manual
+  de `atualizado_em` na rota de status é necessária, não uma duplicação
+  de fonte de verdade.
 - **Sem função Postgres nova** — mutação via `adminClient()` direto,
   mesmo padrão de `GET /api/superadmin/campanhas` (S7).
+- **`transicionarStatus(atual, novo, agora?)` recebe o timestamp como
+  parâmetro, nunca chama `new Date()` internamente.** `agora` tem valor
+  default `new Date().toISOString()` — código de produção não muda (chama
+  sem o 3º argumento, pega o real "agora"), mas os testes passam um valor
+  fixo e comparam igualdade exata em vez de `expect.any(String)`. Isso é o
+  que faz a função ser de fato pura/determinística, não só "chamada de
+  função pura".
+- Toda validação de criação de campanha é pura e testável sem HTTP:
+  `subdominioValido`/`ufValida`/`dataEleicaoValida` (`validacao.ts`) +
+  `validarNovaCampanha` (`validar-nova-campanha.ts`, compõe as três e monta
+  o objeto pronto pro `insert`). A rota só chama `validarNovaCampanha` e
+  traduz o resultado — nunca reimplementa uma regra de validação.
 - `subdominio`: normaliza (`trim()` + `toLowerCase()`) ANTES de validar
   `^[a-z0-9-]+$`, tamanho 3-63.
 - `uf`: normaliza (`trim()` + `toUpperCase()`) ANTES de validar `^[A-Z]{2}$`.
@@ -45,14 +68,24 @@ inspecionar, nenhuma migration nesta fatia).
 - `suspensa_em`: setado ao entrar em `suspensa`; limpo (`null`) ao sair de
   volta pra `ativa`; **omitido** (não `null`) do update ao ir pra
   `encerrada` — preserva o histórico.
-- Toda a lógica acima de transição vive em UMA função pura
-  (`transicionarStatus`), que já monta o objeto de update completo — as
-  rotas nunca decidem `suspensa_em` por conta própria.
+- A rota de status valida `isStatusCampanha(atual.status)` (o valor lido
+  do banco) antes de chamar `transicionarStatus` — se o valor lido não
+  bater com nenhum status conhecido (dado corrompido/enum alterado por
+  fora), retorna `500`, nunca deixa passar pra frente.
 - `POST /api/superadmin/campanhas` retorna `201` com a linha criada.
   `POST /api/superadmin/campanhas/status` retorna `200 {campanha: <linha
   atualizada>}`. Nenhuma das duas retorna só `{ok:true}`.
 - Erro de unicidade de `subdominio` (Postgres `23505`) vira `400 {erro:
   'subdomínio já em uso'}`, nunca `500`.
+- Toda rota trata corpo de request malformado (`req.json()` lançando) como
+  `400 {erro: 'corpo inválido'}`.
+- **Mensagens de erro:** o texto exato só é asserido em teste quando o
+  spec ou este plano mandam um texto específico (`'já está nesse
+  status'`, `'campanha encerrada não pode mudar de status'`, `'subdomínio
+  já em uso'`, `'campanha não encontrada'`). Mensagens inventadas ad hoc
+  pra outros casos (formato de campo, tipo inválido) só têm o `status`
+  HTTP testado, não o texto exato — uma pequena melhoria de wording não
+  deveria quebrar dezenas de testes.
 - Commits frequentes; mensagens estilo do repo (`feat: ...`, `test: ...`).
 
 ---
@@ -74,7 +107,7 @@ inspecionar, nenhuma migration nesta fatia).
 - `web/lib/supabase/server.ts` → `adminClient()` — cliente `service_role`,
   bypassa RLS.
 - `web/app/api/superadmin/campanhas/route.ts` — conteúdo atual completo
-  (Task 2 modifica este arquivo):
+  (Task 3 modifica este arquivo):
   ```typescript
   import { NextResponse } from 'next/server';
   import { requireSuperadmin } from '../../../../lib/supabase/require-superadmin';
@@ -92,7 +125,7 @@ inspecionar, nenhuma migration nesta fatia).
   }
   ```
 - `web/app/api/superadmin/campanhas/route.test.ts` — conteúdo atual
-  completo (Task 2 reescreve este arquivo, preservando os 3 testes do
+  completo (Task 3 reescreve este arquivo, preservando os 3 testes do
   `GET`):
   ```typescript
   import { describe, it, expect, vi } from 'vitest';
@@ -144,7 +177,7 @@ inspecionar, nenhuma migration nesta fatia).
   });
   ```
 - `web/app/superadmin/dashboard/DashboardSuperadminClient.tsx` — conteúdo
-  atual completo (Task 4 modifica este arquivo):
+  atual completo (Task 5 modifica este arquivo):
   ```tsx
   'use client';
   import { useEffect, useState } from 'react';
@@ -264,9 +297,9 @@ inspecionar, nenhuma migration nesta fatia).
   }
   ```
 - `web/app/superadmin/dashboard/DashboardSuperadminClient.test.tsx` —
-  conteúdo atual completo (Task 4 reescreve este arquivo, preservando os 7
+  conteúdo atual completo (Task 5 reescreve este arquivo, preservando os 7
   testes existentes — a fixture `mockCampanhas` precisa ganhar `status:
-  'ativa'` pra não quebrar `PROXIMOS_STATUS[c.status]` na Task 4):
+  'ativa'` pra não quebrar `PROXIMOS_STATUS[c.status]` na Task 5):
   ```tsx
   // web/app/superadmin/dashboard/DashboardSuperadminClient.test.tsx
   // @vitest-environment jsdom
@@ -401,7 +434,7 @@ inspecionar, nenhuma migration nesta fatia).
 
 ---
 
-### Task 1: Biblioteca de domínio — `web/lib/campanha/`
+### Task 1: Máquina de estados — `web/lib/campanha/constantes.ts` + `transicionar-status.ts`
 
 **Files:**
 - Create: `web/lib/campanha/constantes.ts`
@@ -411,18 +444,18 @@ inspecionar, nenhuma migration nesta fatia).
 **Interfaces:**
 - Produces: `CARGOS`, `Cargo`, `isCargo`; `ABRANGENCIAS`, `Abrangencia`,
   `isAbrangencia`; `STATUS_CAMPANHA`, `StatusCampanha`, `isStatusCampanha`
-  (todos em `constantes.ts`); `transicionarStatus(atual, novo):
+  (todos em `constantes.ts`); `transicionarStatus(atual, novo, agora?):
   ResultadoTransicao` (em `transicionar-status.ts`, importa `StatusCampanha`
-  de `./constantes`). Tasks 2 e 3 consomem tudo isso.
+  de `./constantes`). Tasks 2, 3 e 4 consomem isso.
 
 **Nota de estrutura:** o spec descrevia `web/lib/campanha.ts` (arquivo
 plano) — mudado pra `web/lib/campanha/constantes.ts` (dentro de um
-diretório) porque `transicionar-status.ts` também precisa viver junto
-(mesmo domínio) e este projeto nunca mistura um arquivo e um diretório de
-mesmo nome no mesmo lugar (`web/lib/auth.ts` + `web/lib/auth/` não
-coexistem em nenhum lugar do código atual — só uma forma ou outra). Um
-diretório `web/lib/campanha/` pros dois arquivos é consistente com o
-padrão já usado por `web/lib/auth/`, `web/lib/pessoa/`, `web/lib/vinculo/`.
+diretório) porque outros arquivos deste domínio (`transicionar-status.ts`,
+`validacao.ts`, `validar-nova-campanha.ts`, Tasks 2-3) também precisam
+viver junto, e este projeto nunca mistura um arquivo e um diretório de
+mesmo nome no mesmo lugar. Um diretório `web/lib/campanha/` é consistente
+com o padrão já usado por `web/lib/auth/`, `web/lib/pessoa/`,
+`web/lib/vinculo/`.
 
 - [ ] **Step 1: Implementar as constantes (sem teste próprio — mesmo padrão de `web/lib/modulos.ts`, S6, que também não tem teste dedicado pra guards triviais de lista fechada)**
 
@@ -447,33 +480,28 @@ export function isStatusCampanha(value: string): value is StatusCampanha {
 }
 ```
 
-- [ ] **Step 2: Escrever o teste de `transicionarStatus`**
+- [ ] **Step 2: Escrever o teste de `transicionarStatus` (passando um `agora` fixo — a função é determinística, sem `expect.any(String)`)**
 
 ```typescript
 // web/lib/campanha/transicionar-status.test.ts
 import { describe, it, expect } from 'vitest';
 import { transicionarStatus } from './transicionar-status';
 
+const AGORA = '2026-07-07T12:00:00.000Z';
+
 describe('transicionarStatus', () => {
-  it('ativa -> suspensa: válida, seta suspensa_em (string)', () => {
-    const r = transicionarStatus('ativa', 'suspensa');
-    expect(r.valida).toBe(true);
-    if (r.valida) {
-      expect(r.update.status).toBe('suspensa');
-      expect(typeof r.update.suspensa_em).toBe('string');
-    }
+  it('ativa -> suspensa: válida, usa exatamente o "agora" recebido como suspensa_em', () => {
+    const r = transicionarStatus('ativa', 'suspensa', AGORA);
+    expect(r).toEqual({ valida: true, update: { status: 'suspensa', suspensa_em: AGORA } });
   });
 
   it('suspensa -> ativa: válida, limpa suspensa_em (null)', () => {
-    const r = transicionarStatus('suspensa', 'ativa');
-    expect(r.valida).toBe(true);
-    if (r.valida) {
-      expect(r.update).toEqual({ status: 'ativa', suspensa_em: null });
-    }
+    const r = transicionarStatus('suspensa', 'ativa', AGORA);
+    expect(r).toEqual({ valida: true, update: { status: 'ativa', suspensa_em: null } });
   });
 
   it('ativa -> encerrada: válida, NÃO tem a chave suspensa_em', () => {
-    const r = transicionarStatus('ativa', 'encerrada');
+    const r = transicionarStatus('ativa', 'encerrada', AGORA);
     expect(r.valida).toBe(true);
     if (r.valida) {
       expect(r.update).toEqual({ status: 'encerrada' });
@@ -482,7 +510,7 @@ describe('transicionarStatus', () => {
   });
 
   it('suspensa -> encerrada: válida, NÃO tem a chave suspensa_em (preserva o histórico)', () => {
-    const r = transicionarStatus('suspensa', 'encerrada');
+    const r = transicionarStatus('suspensa', 'encerrada', AGORA);
     expect(r.valida).toBe(true);
     if (r.valida) {
       expect(r.update).toEqual({ status: 'encerrada' });
@@ -492,14 +520,21 @@ describe('transicionarStatus', () => {
 
   it('encerrada -> ativa (ou qualquer coisa saindo de encerrada): inválida', () => {
     const r = transicionarStatus('encerrada', 'ativa');
-    expect(r.valida).toBe(false);
-    if (!r.valida) expect(r.erro).toBe('campanha encerrada não pode mudar de status');
+    expect(r).toEqual({ valida: false, erro: 'campanha encerrada não pode mudar de status' });
   });
 
   it('ativa -> ativa (mesmo status): inválida', () => {
     const r = transicionarStatus('ativa', 'ativa');
-    expect(r.valida).toBe(false);
-    if (!r.valida) expect(r.erro).toBe('já está nesse status');
+    expect(r).toEqual({ valida: false, erro: 'já está nesse status' });
+  });
+
+  it('sem 3º argumento, usa o relógio real (chamada como em produção)', () => {
+    const r = transicionarStatus('ativa', 'suspensa');
+    expect(r.valida).toBe(true);
+    if (r.valida) {
+      expect(typeof r.update.suspensa_em).toBe('string');
+      expect(Number.isNaN(Date.parse(r.update.suspensa_em!))).toBe(false);
+    }
   });
 });
 ```
@@ -522,6 +557,7 @@ export type ResultadoTransicao =
 export function transicionarStatus(
   atual: StatusCampanha,
   novo: StatusCampanha,
+  agora: string = new Date().toISOString(),
 ): ResultadoTransicao {
   if (atual === novo) {
     return { valida: false, erro: 'já está nesse status' };
@@ -530,7 +566,7 @@ export function transicionarStatus(
     return { valida: false, erro: 'campanha encerrada não pode mudar de status' };
   }
   if (novo === 'suspensa') {
-    return { valida: true, update: { status: 'suspensa', suspensa_em: new Date().toISOString() } };
+    return { valida: true, update: { status: 'suspensa', suspensa_em: agora } };
   }
   if (novo === 'ativa') {
     return { valida: true, update: { status: 'ativa', suspensa_em: null } };
@@ -542,7 +578,7 @@ export function transicionarStatus(
 - [ ] **Step 5: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run lib/campanha/transicionar-status.test.ts`
-Expected: PASS — 6/6
+Expected: PASS — 7/7
 
 - [ ] **Step 6: Rodar a suíte inteira do projeto**
 
@@ -553,26 +589,348 @@ Expected: todos os arquivos passam, incluindo os pré-existentes.
 
 ```bash
 git add web/lib/campanha/constantes.ts web/lib/campanha/transicionar-status.ts web/lib/campanha/transicionar-status.test.ts
-git commit -m "feat: constantes de campanha + transicionarStatus (máquina de estados pura)"
+git commit -m "feat: constantes de campanha + transicionarStatus (máquina de estados pura e determinística)"
 ```
 
 ---
 
-### Task 2: `POST /api/superadmin/campanhas` (criar campanha)
+### Task 2: Validação de nova campanha — `web/lib/campanha/validacao.ts` + `validar-nova-campanha.ts`
+
+**Files:**
+- Create: `web/lib/campanha/validacao.ts`
+- Create: `web/lib/campanha/validacao.test.ts`
+- Create: `web/lib/campanha/validar-nova-campanha.ts`
+- Create: `web/lib/campanha/validar-nova-campanha.test.ts`
+
+**Interfaces:**
+- Consumes: `isCargo`, `isAbrangencia`, `type Cargo`, `type Abrangencia`
+  (`web/lib/campanha/constantes.ts`, Task 1).
+- Produces: `subdominioValido(s): boolean`, `ufValida(s): boolean`,
+  `dataEleicaoValida(s): boolean` (`validacao.ts`);
+  `validarNovaCampanha(input: NovaCampanhaInput): ResultadoValidacaoCampanha`
+  (`validar-nova-campanha.ts`, também exporta os tipos `NovaCampanhaInput`
+  e `NovaCampanhaValidada`). Task 3 consome `validarNovaCampanha` e os
+  tipos.
+
+**Por que dois arquivos separados:** `validacao.ts` tem os 3 checks de
+formato "burros" (regex + comparação), sem noção nenhuma de "campanha" —
+são candidatos naturais a reuso futuro (edição de campanha, importação em
+lote) e merecem seus próprios testes focados, incluindo os casos de
+calendário (bissexto) que já pegaram um bug real durante o brainstorm desta
+fatia. `validar-nova-campanha.ts` é a orquestração: decide QUAIS campos são
+obrigatórios, a regra municipal/estadual, e monta o objeto final pro
+`insert` — usa os 3 checks de `validacao.ts` mas não reimplementa nenhum.
+
+- [ ] **Step 1: Escrever o teste de `validacao.ts`**
+
+```typescript
+// web/lib/campanha/validacao.test.ts
+import { describe, it, expect } from 'vitest';
+import { subdominioValido, ufValida, dataEleicaoValida } from './validacao';
+
+describe('subdominioValido', () => {
+  it('aceita minúsculas/números/hífen dentro do tamanho', () => {
+    expect(subdominioValido('campanha-2028')).toBe(true);
+  });
+  it('rejeita maiúscula (quem chama deve normalizar antes)', () => {
+    expect(subdominioValido('ABC')).toBe(false);
+  });
+  it('rejeita espaço e pontuação', () => {
+    expect(subdominioValido('a b')).toBe(false);
+    expect(subdominioValido('teste!!!')).toBe(false);
+  });
+  it('rejeita menos de 3 ou mais de 63 caracteres', () => {
+    expect(subdominioValido('ab')).toBe(false);
+    expect(subdominioValido('a'.repeat(64))).toBe(false);
+  });
+});
+
+describe('ufValida', () => {
+  it('aceita exatamente 2 letras maiúsculas', () => {
+    expect(ufValida('PI')).toBe(true);
+  });
+  it('rejeita minúsculas (quem chama deve normalizar antes)', () => {
+    expect(ufValida('pi')).toBe(false);
+  });
+  it('rejeita formato errado', () => {
+    expect(ufValida('P1')).toBe(false);
+    expect(ufValida('PIA')).toBe(false);
+  });
+});
+
+describe('dataEleicaoValida', () => {
+  it('aceita data real bem formatada', () => {
+    expect(dataEleicaoValida('2028-10-01')).toBe(true);
+  });
+  it('rejeita formato errado', () => {
+    expect(dataEleicaoValida('10/01/2028')).toBe(false);
+  });
+  it('rejeita string vazia', () => {
+    expect(dataEleicaoValida('')).toBe(false);
+  });
+  it('rejeita data impossível mesmo com formato correto (2028-02-30)', () => {
+    expect(dataEleicaoValida('2028-02-30')).toBe(false);
+  });
+  it('rejeita 29 de fevereiro em ano não-bissexto (2027)', () => {
+    expect(dataEleicaoValida('2027-02-29')).toBe(false);
+  });
+  it('aceita 29 de fevereiro em ano bissexto (2028)', () => {
+    expect(dataEleicaoValida('2028-02-29')).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: Rodar e confirmar que falha**
+
+Run: `cd web && npx vitest run lib/campanha/validacao.test.ts`
+Expected: FAIL — `Cannot find module './validacao'`
+
+- [ ] **Step 3: Implementar `validacao.ts`**
+
+```typescript
+// web/lib/campanha/validacao.ts
+export function subdominioValido(s: string): boolean {
+  return /^[a-z0-9-]+$/.test(s) && s.length >= 3 && s.length <= 63;
+}
+
+export function ufValida(s: string): boolean {
+  return /^[A-Z]{2}$/.test(s);
+}
+
+export function dataEleicaoValida(s: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return false;
+  const [, y, mo, d] = m;
+  const data = new Date(`${s}T00:00:00.000Z`);
+  return (
+    data.getUTCFullYear() === Number(y) &&
+    data.getUTCMonth() + 1 === Number(mo) &&
+    data.getUTCDate() === Number(d)
+  );
+}
+```
+
+- [ ] **Step 4: Rodar e confirmar que passa**
+
+Run: `cd web && npx vitest run lib/campanha/validacao.test.ts`
+Expected: PASS — 13/13
+
+- [ ] **Step 5: Escrever o teste de `validarNovaCampanha`**
+
+```typescript
+// web/lib/campanha/validar-nova-campanha.test.ts
+import { describe, it, expect } from 'vitest';
+import { validarNovaCampanha } from './validar-nova-campanha';
+
+const CORPO_MUNICIPAL_VALIDO = {
+  subdominio: 'campanha-nova', nome: 'Campanha Nova', cargo: 'prefeito',
+  abrangencia: 'municipal', municipioId: 2211001, dataEleicao: '2028-10-01',
+};
+
+describe('validarNovaCampanha', () => {
+  it('corpo municipal válido: ok, monta o objeto pronto pro insert', () => {
+    const r = validarNovaCampanha(CORPO_MUNICIPAL_VALIDO);
+    expect(r).toEqual({
+      ok: true,
+      campanha: {
+        subdominio: 'campanha-nova', nome: 'Campanha Nova', cargo: 'prefeito',
+        abrangencia: 'municipal', municipio_id: 2211001, uf: null, data_eleicao: '2028-10-01',
+      },
+    });
+  });
+
+  it('corpo estadual válido: ok, normaliza uf, municipio_id null', () => {
+    const r = validarNovaCampanha({
+      subdominio: 'campanha-estadual', nome: 'Campanha Estadual', cargo: 'deputado_estadual',
+      abrangencia: 'estadual', uf: ' pi ', dataEleicao: '2028-10-01',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.campanha.uf).toBe('PI');
+      expect(r.campanha.municipio_id).toBeNull();
+    }
+  });
+
+  it('normaliza subdominio pra minúsculo', () => {
+    const r = validarNovaCampanha({ ...CORPO_MUNICIPAL_VALIDO, subdominio: 'ABC-Novo' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.campanha.subdominio).toBe('abc-novo');
+  });
+
+  it('falha com campo obrigatório ausente', () => {
+    const { nome: _nome, ...semNome } = CORPO_MUNICIPAL_VALIDO;
+    expect(validarNovaCampanha(semNome).ok).toBe(false);
+  });
+
+  it('falha com subdominio em formato inválido mesmo após normalizar (delega pra subdominioValido, já testada isoladamente)', () => {
+    expect(validarNovaCampanha({ ...CORPO_MUNICIPAL_VALIDO, subdominio: 'a b' }).ok).toBe(false);
+  });
+
+  it('falha com cargo/abrangencia fora da lista fechada', () => {
+    expect(validarNovaCampanha({ ...CORPO_MUNICIPAL_VALIDO, cargo: 'presidente' }).ok).toBe(false);
+    expect(validarNovaCampanha({ ...CORPO_MUNICIPAL_VALIDO, abrangencia: 'nacional' }).ok).toBe(false);
+  });
+
+  it('falha quando municipal sem municipioId, ou com uf junto', () => {
+    const { municipioId: _m, ...semMunicipio } = CORPO_MUNICIPAL_VALIDO;
+    expect(validarNovaCampanha(semMunicipio).ok).toBe(false);
+    expect(validarNovaCampanha({ ...CORPO_MUNICIPAL_VALIDO, uf: 'PI' }).ok).toBe(false);
+  });
+
+  it('falha quando estadual sem uf, ou com municipioId junto', () => {
+    const corpoEstadual = {
+      subdominio: 'campanha-est', nome: 'Campanha Estadual', cargo: 'deputado_estadual',
+      abrangencia: 'estadual', uf: 'PI', dataEleicao: '2028-10-01',
+    };
+    const { uf: _uf, ...semUf } = corpoEstadual;
+    expect(validarNovaCampanha(semUf).ok).toBe(false);
+    expect(validarNovaCampanha({ ...corpoEstadual, municipioId: 2211001 }).ok).toBe(false);
+  });
+
+  it('falha com uf inválida após normalizar (delega pra ufValida, já testada isoladamente)', () => {
+    const corpoEstadual = {
+      subdominio: 'campanha-est', nome: 'Campanha Estadual', cargo: 'deputado_estadual',
+      abrangencia: 'estadual', uf: 'P1', dataEleicao: '2028-10-01',
+    };
+    expect(validarNovaCampanha(corpoEstadual).ok).toBe(false);
+  });
+
+  it('falha com dataEleicao inválida (delega pra dataEleicaoValida, já testada isoladamente)', () => {
+    expect(validarNovaCampanha({ ...CORPO_MUNICIPAL_VALIDO, dataEleicao: '2028-02-30' }).ok).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 6: Rodar e confirmar que falha**
+
+Run: `cd web && npx vitest run lib/campanha/validar-nova-campanha.test.ts`
+Expected: FAIL — `Cannot find module './validar-nova-campanha'`
+
+- [ ] **Step 7: Implementar `validarNovaCampanha`**
+
+```typescript
+// web/lib/campanha/validar-nova-campanha.ts
+import { isCargo, isAbrangencia, type Cargo, type Abrangencia } from './constantes';
+import { subdominioValido, ufValida, dataEleicaoValida } from './validacao';
+
+export type NovaCampanhaInput = {
+  subdominio?: string;
+  nome?: string;
+  cargo?: string;
+  abrangencia?: string;
+  municipioId?: number;
+  uf?: string;
+  dataEleicao?: string;
+};
+
+export type NovaCampanhaValidada = {
+  subdominio: string;
+  nome: string;
+  cargo: Cargo;
+  abrangencia: Abrangencia;
+  municipio_id: number | null;
+  uf: string | null;
+  data_eleicao: string;
+};
+
+export type ResultadoValidacaoCampanha =
+  | { ok: true; campanha: NovaCampanhaValidada }
+  | { ok: false; erro: string };
+
+export function validarNovaCampanha(input: NovaCampanhaInput): ResultadoValidacaoCampanha {
+  const { nome, cargo, abrangencia, municipioId, dataEleicao } = input;
+  const subdominio = input.subdominio?.trim().toLowerCase();
+
+  if (!subdominio || !nome || !cargo || !abrangencia || !dataEleicao) {
+    return { ok: false, erro: 'campos obrigatórios ausentes' };
+  }
+  if (!subdominioValido(subdominio)) {
+    return {
+      ok: false,
+      erro: 'subdomínio inválido (use apenas letras minúsculas, números e hífen, 3-63 caracteres)',
+    };
+  }
+  if (!isCargo(cargo)) {
+    return { ok: false, erro: `cargo inválido: "${cargo}"` };
+  }
+  if (!isAbrangencia(abrangencia)) {
+    return { ok: false, erro: `abrangência inválida: "${abrangencia}"` };
+  }
+
+  let uf: string | null = null;
+  if (abrangencia === 'municipal') {
+    if (municipioId == null || input.uf) {
+      return { ok: false, erro: 'abrangência municipal exige municipioId e não aceita uf' };
+    }
+  } else {
+    if (!input.uf || municipioId != null) {
+      return { ok: false, erro: 'abrangência estadual exige uf e não aceita municipioId' };
+    }
+    uf = input.uf.trim().toUpperCase();
+    if (!ufValida(uf)) {
+      return { ok: false, erro: 'uf inválida (use exatamente 2 letras)' };
+    }
+  }
+
+  if (!dataEleicaoValida(dataEleicao)) {
+    return { ok: false, erro: 'dataEleicao inválida (use o formato YYYY-MM-DD e uma data real)' };
+  }
+
+  return {
+    ok: true,
+    campanha: {
+      subdominio,
+      nome,
+      cargo,
+      abrangencia,
+      municipio_id: abrangencia === 'municipal' ? municipioId! : null,
+      uf,
+      data_eleicao: dataEleicao,
+    },
+  };
+}
+```
+
+- [ ] **Step 8: Rodar e confirmar que passa**
+
+Run: `cd web && npx vitest run lib/campanha/validar-nova-campanha.test.ts`
+Expected: PASS — 10/10
+
+- [ ] **Step 9: Rodar a suíte inteira do projeto**
+
+Run: `cd web && npx vitest run`
+Expected: todos os arquivos passam.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add web/lib/campanha/validacao.ts web/lib/campanha/validacao.test.ts web/lib/campanha/validar-nova-campanha.ts web/lib/campanha/validar-nova-campanha.test.ts
+git commit -m "feat: validarNovaCampanha (validação pura de criação de campanha)"
+```
+
+---
+
+### Task 3: `POST /api/superadmin/campanhas` (criar campanha)
 
 **Files:**
 - Modify: `web/app/api/superadmin/campanhas/route.ts`
 - Modify: `web/app/api/superadmin/campanhas/route.test.ts`
 
 **Interfaces:**
-- Consumes: `isCargo`, `isAbrangencia` (`web/lib/campanha/constantes.ts`,
-  Task 1); `requireSuperadmin`; `adminClient`.
+- Consumes: `validarNovaCampanha`, `type NovaCampanhaInput`
+  (`web/lib/campanha/validar-nova-campanha.ts`, Task 2); `requireSuperadmin`;
+  `adminClient`.
 - Produces: `POST /api/superadmin/campanhas` — `201` com a linha criada em
   sucesso, `400` em qualquer falha de validação/unicidade. `GET` ganha
-  `status` na lista de colunas selecionadas (necessário pra Task 4
-  calcular os botões de transição). Task 4 consome ambos via `fetch`.
+  `status` na lista de colunas selecionadas (necessário pra Task 5
+  calcular os botões de transição). Task 5 consome ambos via `fetch`.
 
-- [ ] **Step 1: Escrever o teste (reescreve o arquivo inteiro — preserva os 3 testes do `GET`, adiciona `status` na fixture, adiciona os testes do `POST`)**
+**Rota fica fina de propósito** — toda a validação já foi testada
+isoladamente na Task 2; esta task só testa a "fiação": bloqueio,
+corpo malformado, repasse de falha de validação, tradução de erro do
+Postgres, sucesso.
+
+- [ ] **Step 1: Escrever o teste (reescreve o arquivo inteiro — preserva os 3 testes do `GET` com `status` na fixture, adiciona os testes do `POST`)**
 
 ```typescript
 // web/app/api/superadmin/campanhas/route.test.ts
@@ -602,7 +960,7 @@ function mockAdmin(overrides: Partial<{
   const insert = vi.fn(() => ({ select: selectAfterInsert }));
   const select = vi.fn(async () => ({ data: selectData, error: selectError }));
   const from = vi.fn(() => ({ select, insert }));
-  return { from, select, insert, single };
+  return { from, select, insert };
 }
 
 vi.mock('../../../../lib/supabase/server', () => ({ adminClient: vi.fn() }));
@@ -611,15 +969,15 @@ import { GET, POST } from './route';
 import { requireSuperadmin } from '../../../../lib/supabase/require-superadmin';
 import { adminClient } from '../../../../lib/supabase/server';
 
-function postReq(body: unknown) {
+function postReq(bodyText: string) {
   return new Request('http://localhost/api/superadmin/campanhas', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    body: bodyText,
   });
 }
 
-const CORPO_MUNICIPAL_VALIDO = {
+const CORPO_VALIDO = {
   subdominio: 'campanha-nova', nome: 'Campanha Nova', cargo: 'prefeito',
   abrangencia: 'municipal', municipioId: 2211001, dataEleicao: '2028-10-01',
 };
@@ -641,7 +999,9 @@ describe('GET /api/superadmin/campanhas', () => {
   });
 
   it('500 quando a leitura falha', async () => {
-    vi.mocked(adminClient).mockReturnValue(mockAdmin({ selectData: null, selectError: { message: 'falha' } }) as never);
+    vi.mocked(adminClient).mockReturnValue(
+      mockAdmin({ selectData: null, selectError: { message: 'falha' } }) as never,
+    );
     const res = await GET();
     expect(res.status).toBe(500);
   });
@@ -652,90 +1012,26 @@ describe('POST /api/superadmin/campanhas', () => {
     const { NextResponse } = await import('next/server');
     const blocked = NextResponse.json({ erro: 'acesso restrito ao superadmin' }, { status: 403 });
     vi.mocked(requireSuperadmin).mockResolvedValueOnce(blocked);
-    const res = await POST(postReq(CORPO_MUNICIPAL_VALIDO));
+    const res = await POST(postReq(JSON.stringify(CORPO_VALIDO)));
     expect(res.status).toBe(403);
   });
 
-  it('400 com campo obrigatório faltando, sem chamar insert', async () => {
+  it('400 com corpo que não é JSON válido, sem chamar insert', async () => {
     const admin = mockAdmin();
     vi.mocked(adminClient).mockReturnValue(admin as never);
-    const { nome: _nome, ...semNome } = CORPO_MUNICIPAL_VALIDO;
-    const res = await POST(postReq(semNome));
+    const res = await POST(postReq('não é json'));
     expect(res.status).toBe(400);
     expect(admin.insert).not.toHaveBeenCalled();
   });
 
-  it('subdominio é normalizado (ABC vira abc); 400 se inválido mesmo normalizado', async () => {
+  it('400 quando validarNovaCampanha rejeita (ex.: campo obrigatório ausente), sem chamar insert', async () => {
     const admin = mockAdmin();
     vi.mocked(adminClient).mockReturnValue(admin as never);
-    await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, subdominio: 'ABC' }));
-    expect(admin.insert).toHaveBeenCalledWith(expect.objectContaining({ subdominio: 'abc' }));
-
-    const res = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, subdominio: 'a b' }));
+    const { nome: _nome, ...semNome } = CORPO_VALIDO;
+    const res = await POST(postReq(JSON.stringify(semNome)));
     expect(res.status).toBe(400);
-  });
-
-  it('400 com cargo/abrangencia fora da lista fechada, sem chamar insert', async () => {
-    const admin = mockAdmin();
-    vi.mocked(adminClient).mockReturnValue(admin as never);
-    const res1 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, cargo: 'presidente' }));
-    expect(res1.status).toBe(400);
-    const res2 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, abrangencia: 'nacional' }));
-    expect(res2.status).toBe(400);
     expect(admin.insert).not.toHaveBeenCalled();
-  });
-
-  it('400 quando municipal sem municipioId, ou com uf junto', async () => {
-    const admin = mockAdmin();
-    vi.mocked(adminClient).mockReturnValue(admin as never);
-    const { municipioId: _m, ...semMunicipio } = CORPO_MUNICIPAL_VALIDO;
-    const res1 = await POST(postReq(semMunicipio));
-    expect(res1.status).toBe(400);
-    const res2 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, uf: 'PI' }));
-    expect(res2.status).toBe(400);
-  });
-
-  it('400 quando estadual sem uf, ou com municipioId junto', async () => {
-    const admin = mockAdmin();
-    vi.mocked(adminClient).mockReturnValue(admin as never);
-    const corpoEstadual = {
-      subdominio: 'campanha-est', nome: 'Campanha Estadual', cargo: 'deputado_estadual',
-      abrangencia: 'estadual', uf: 'PI', dataEleicao: '2028-10-01',
-    };
-    const { uf: _uf, ...semUf } = corpoEstadual;
-    const res1 = await POST(postReq(semUf));
-    expect(res1.status).toBe(400);
-    const res2 = await POST(postReq({ ...corpoEstadual, municipioId: 2211001 }));
-    expect(res2.status).toBe(400);
-  });
-
-  it('uf é normalizada (" pi " vira "PI"); 400 se inválida após normalizar', async () => {
-    const admin = mockAdmin();
-    vi.mocked(adminClient).mockReturnValue(admin as never);
-    const corpoEstadual = {
-      subdominio: 'campanha-est', nome: 'Campanha Estadual', cargo: 'deputado_estadual',
-      abrangencia: 'estadual', uf: ' pi ', dataEleicao: '2028-10-01',
-    };
-    await POST(postReq(corpoEstadual));
-    expect(admin.insert).toHaveBeenCalledWith(expect.objectContaining({ uf: 'PI' }));
-
-    const res = await POST(postReq({ ...corpoEstadual, uf: 'P1' }));
-    expect(res.status).toBe(400);
-  });
-
-  it('400 com dataEleicao vazia/formato errado/impossível; 201 em ano bissexto válido', async () => {
-    const admin = mockAdmin();
-    vi.mocked(adminClient).mockReturnValue(admin as never);
-    const res1 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, dataEleicao: '' }));
-    expect(res1.status).toBe(400);
-    const res2 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, dataEleicao: '10/01/2028' }));
-    expect(res2.status).toBe(400);
-    const res3 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, dataEleicao: '2028-02-30' }));
-    expect(res3.status).toBe(400);
-    const res4 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, dataEleicao: '2027-02-29' }));
-    expect(res4.status).toBe(400);
-    const res5 = await POST(postReq({ ...CORPO_MUNICIPAL_VALIDO, dataEleicao: '2028-02-29' }));
-    expect(res5.status).toBe(201);
+    expect((await res.json()).erro).toEqual(expect.any(String));
   });
 
   it('400 com subdominio duplicado, sem vazar erro cru do Postgres', async () => {
@@ -745,17 +1041,31 @@ describe('POST /api/superadmin/campanhas', () => {
         insertError: { code: '23505', message: 'duplicate key value violates unique constraint "campanha_subdominio_key"' },
       }) as never,
     );
-    const res = await POST(postReq(CORPO_MUNICIPAL_VALIDO));
+    const res = await POST(postReq(JSON.stringify(CORPO_VALIDO)));
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ erro: 'subdomínio já em uso' });
   });
 
-  it('201 com a linha criada em caso de sucesso', async () => {
-    const linhaCriada = { id: 'c-novo', ...CORPO_MUNICIPAL_VALIDO, status: 'ativa' };
-    vi.mocked(adminClient).mockReturnValue(mockAdmin({ insertData: linhaCriada }) as never);
-    const res = await POST(postReq(CORPO_MUNICIPAL_VALIDO));
+  it('400 com outro erro de banco, repassando a mensagem', async () => {
+    vi.mocked(adminClient).mockReturnValue(
+      mockAdmin({ insertData: null, insertError: { code: '99999', message: 'erro genérico do banco' } }) as never,
+    );
+    const res = await POST(postReq(JSON.stringify(CORPO_VALIDO)));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ erro: 'erro genérico do banco' });
+  });
+
+  it('201 com a linha criada, chamando insert com o objeto já validado/normalizado', async () => {
+    const linhaCriada = { id: 'c-novo', ...CORPO_VALIDO, status: 'ativa' };
+    const admin = mockAdmin({ insertData: linhaCriada });
+    vi.mocked(adminClient).mockReturnValue(admin as never);
+    const res = await POST(postReq(JSON.stringify(CORPO_VALIDO)));
     expect(res.status).toBe(201);
     expect(await res.json()).toEqual(linhaCriada);
+    expect(admin.insert).toHaveBeenCalledWith({
+      subdominio: 'campanha-nova', nome: 'Campanha Nova', cargo: 'prefeito',
+      abrangencia: 'municipal', municipio_id: 2211001, uf: null, data_eleicao: '2028-10-01',
+    });
   });
 });
 ```
@@ -763,20 +1073,19 @@ describe('POST /api/superadmin/campanhas', () => {
 - [ ] **Step 2: Rodar e confirmar que falha**
 
 Run: `cd web && npx vitest run app/api/superadmin/campanhas/route.test.ts`
-Expected: FAIL — `POST` não exportado de `./route`, e o `GET` existente
-também falha (fixture ganhou `status`, mas o `GET` real ainda não seleciona
-essa coluna, então `toEqual(mockCampanhas)` compara igual pro mock — na
-verdade o `GET` test passa porque o mock controla o retorno; só o `POST`
-falha por não existir ainda).
+Expected: FAIL — os testes de `GET` passam (o mock controla o retorno,
+`status` na fixture não quebra nada); os testes de `POST` falham porque
+`POST` ainda não é exportado de `./route` (a chamada `POST(...)` explode
+chamando `undefined` como função).
 
-- [ ] **Step 3: Implementar (adiciona `POST` e `status` ao `select` do `GET`)**
+- [ ] **Step 3: Implementar (adiciona `POST`, e `status` ao `select` do `GET`)**
 
 ```typescript
 // web/app/api/superadmin/campanhas/route.ts
 import { NextResponse } from 'next/server';
 import { requireSuperadmin } from '../../../../lib/supabase/require-superadmin';
 import { adminClient } from '../../../../lib/supabase/server';
-import { isCargo, isAbrangencia } from '../../../../lib/campanha/constantes';
+import { validarNovaCampanha, type NovaCampanhaInput } from '../../../../lib/campanha/validar-nova-campanha';
 
 export async function GET() {
   const blocked = await requireSuperadmin();
@@ -789,97 +1098,25 @@ export async function GET() {
   return NextResponse.json(data);
 }
 
-function subdominioValido(s: string): boolean {
-  return /^[a-z0-9-]+$/.test(s) && s.length >= 3 && s.length <= 63;
-}
-
-function ufValida(s: string): boolean {
-  return /^[A-Z]{2}$/.test(s);
-}
-
-function dataEleicaoValida(s: string): boolean {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  if (!m) return false;
-  const [, y, mo, d] = m;
-  const data = new Date(`${s}T00:00:00.000Z`);
-  return (
-    data.getUTCFullYear() === Number(y) &&
-    data.getUTCMonth() + 1 === Number(mo) &&
-    data.getUTCDate() === Number(d)
-  );
-}
-
 export async function POST(req: Request) {
   const blocked = await requireSuperadmin();
   if (blocked) return blocked;
 
-  let body: {
-    subdominio?: string; nome?: string; cargo?: string; abrangencia?: string;
-    municipioId?: number; uf?: string; dataEleicao?: string;
-  };
+  let body: NovaCampanhaInput;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ erro: 'corpo inválido' }, { status: 400 });
   }
 
-  const { nome, cargo, abrangencia, municipioId, dataEleicao } = body;
-  const subdominio = body.subdominio?.trim().toLowerCase();
-  if (!subdominio || !nome || !cargo || !abrangencia || !dataEleicao) {
-    return NextResponse.json({ erro: 'campos obrigatórios ausentes' }, { status: 400 });
-  }
-  if (!subdominioValido(subdominio)) {
-    return NextResponse.json(
-      { erro: 'subdomínio inválido (use apenas letras minúsculas, números e hífen, 3-63 caracteres)' },
-      { status: 400 },
-    );
-  }
-  if (!isCargo(cargo)) {
-    return NextResponse.json({ erro: `cargo inválido: "${cargo}"` }, { status: 400 });
-  }
-  if (!isAbrangencia(abrangencia)) {
-    return NextResponse.json({ erro: `abrangência inválida: "${abrangencia}"` }, { status: 400 });
-  }
-
-  let uf: string | undefined;
-  if (abrangencia === 'municipal') {
-    if (municipioId == null || body.uf) {
-      return NextResponse.json(
-        { erro: 'abrangência municipal exige municipioId e não aceita uf' },
-        { status: 400 },
-      );
-    }
-  } else {
-    if (!body.uf || municipioId != null) {
-      return NextResponse.json(
-        { erro: 'abrangência estadual exige uf e não aceita municipioId' },
-        { status: 400 },
-      );
-    }
-    uf = body.uf.trim().toUpperCase();
-    if (!ufValida(uf)) {
-      return NextResponse.json({ erro: 'uf inválida (use exatamente 2 letras)' }, { status: 400 });
-    }
-  }
-
-  if (!dataEleicaoValida(dataEleicao)) {
-    return NextResponse.json(
-      { erro: 'dataEleicao inválida (use o formato YYYY-MM-DD e uma data real)' },
-      { status: 400 },
-    );
+  const resultado = validarNovaCampanha(body);
+  if (!resultado.ok) {
+    return NextResponse.json({ erro: resultado.erro }, { status: 400 });
   }
 
   const { data, error } = await adminClient()
     .from('campanha')
-    .insert({
-      subdominio,
-      nome,
-      cargo,
-      abrangencia,
-      municipio_id: abrangencia === 'municipal' ? municipioId : null,
-      uf: abrangencia === 'estadual' ? uf : null,
-      data_eleicao: dataEleicao,
-    })
+    .insert(resultado.campanha)
     .select()
     .single();
 
@@ -896,7 +1133,7 @@ export async function POST(req: Request) {
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/api/superadmin/campanhas/route.test.ts`
-Expected: PASS — 13/13 (3 do `GET` + 10 do `POST`)
+Expected: PASS — 9/9 (3 do `GET` + 6 do `POST`)
 
 - [ ] **Step 5: Rodar a suíte inteira do projeto**
 
@@ -912,19 +1149,19 @@ git commit -m "feat: POST /api/superadmin/campanhas (criar campanha)"
 
 ---
 
-### Task 3: `POST /api/superadmin/campanhas/status` (mudar status)
+### Task 4: `POST /api/superadmin/campanhas/status` (mudar status)
 
 **Files:**
 - Create: `web/app/api/superadmin/campanhas/status/route.ts`
 - Create: `web/app/api/superadmin/campanhas/status/route.test.ts`
 
 **Interfaces:**
-- Consumes: `isStatusCampanha`, `transicionarStatus`
-  (`web/lib/campanha/constantes.ts` + `transicionar-status.ts`, Task 1);
+- Consumes: `isStatusCampanha` (`web/lib/campanha/constantes.ts`, Task 1);
+  `transicionarStatus` (`web/lib/campanha/transicionar-status.ts`, Task 1);
   `requireSuperadmin`; `adminClient`.
 - Produces: `POST /api/superadmin/campanhas/status` — body
   `{campanhaId, novoStatus}`, `200 {campanha: <linha atualizada>}` em
-  sucesso, `400` em qualquer falha. Task 4 consome via `fetch`.
+  sucesso, `400`/`500` em falha. Task 5 consome via `fetch`.
 
 - [ ] **Step 1: Escrever o teste**
 
@@ -964,11 +1201,11 @@ import { POST } from './route';
 import { requireSuperadmin } from '../../../../../lib/supabase/require-superadmin';
 import { adminClient } from '../../../../../lib/supabase/server';
 
-function req(body: unknown) {
+function req(bodyText: string) {
   return new Request('http://localhost/api/superadmin/campanhas/status', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    body: bodyText,
   });
 }
 
@@ -977,15 +1214,23 @@ describe('POST /api/superadmin/campanhas/status', () => {
     const { NextResponse } = await import('next/server');
     const blocked = NextResponse.json({ erro: 'acesso restrito ao superadmin' }, { status: 403 });
     vi.mocked(requireSuperadmin).mockResolvedValueOnce(blocked);
-    const res = await POST(req({ campanhaId: 'c-1', novoStatus: 'suspensa' }));
+    const res = await POST(req(JSON.stringify({ campanhaId: 'c-1', novoStatus: 'suspensa' })));
     expect(res.status).toBe(403);
+  });
+
+  it('400 com corpo que não é JSON válido, sem chamar update', async () => {
+    const admin = mockAdmin();
+    vi.mocked(adminClient).mockReturnValue(admin as never);
+    const res = await POST(req('não é json'));
+    expect(res.status).toBe(400);
+    expect(admin.update).not.toHaveBeenCalled();
   });
 
   it('400 quando a campanha não existe', async () => {
     vi.mocked(adminClient).mockReturnValue(
       mockAdmin({ selectData: null, selectError: { message: 'not found' } }) as never,
     );
-    const res = await POST(req({ campanhaId: 'c-inexistente', novoStatus: 'suspensa' }));
+    const res = await POST(req(JSON.stringify({ campanhaId: 'c-inexistente', novoStatus: 'suspensa' })));
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ erro: 'campanha não encontrada' });
   });
@@ -993,26 +1238,34 @@ describe('POST /api/superadmin/campanhas/status', () => {
   it('400 quando novoStatus não é um StatusCampanha válido, sem chamar update', async () => {
     const admin = mockAdmin();
     vi.mocked(adminClient).mockReturnValue(admin as never);
-    const res = await POST(req({ campanhaId: 'c-1', novoStatus: 'banana' }));
+    const res = await POST(req(JSON.stringify({ campanhaId: 'c-1', novoStatus: 'banana' })));
     expect(res.status).toBe(400);
+    expect(admin.update).not.toHaveBeenCalled();
+  });
+
+  it('500 quando o status atual lido do banco não é um StatusCampanha válido (dado corrompido)', async () => {
+    const admin = mockAdmin({ selectData: { status: 'algo-corrompido' } });
+    vi.mocked(adminClient).mockReturnValue(admin as never);
+    const res = await POST(req(JSON.stringify({ campanhaId: 'c-1', novoStatus: 'suspensa' })));
+    expect(res.status).toBe(500);
     expect(admin.update).not.toHaveBeenCalled();
   });
 
   it('400 quando a transição é inválida (sair de encerrada), sem chamar update', async () => {
     const admin = mockAdmin({ selectData: { status: 'encerrada' } });
     vi.mocked(adminClient).mockReturnValue(admin as never);
-    const res = await POST(req({ campanhaId: 'c-1', novoStatus: 'ativa' }));
+    const res = await POST(req(JSON.stringify({ campanhaId: 'c-1', novoStatus: 'ativa' })));
     expect(res.status).toBe(400);
     expect(admin.update).not.toHaveBeenCalled();
   });
 
-  it('200 com transição válida: aplica exatamente resultado.update e retorna a linha', async () => {
+  it('200 com transição válida: aplica exatamente o resultado de transicionarStatus e retorna a linha', async () => {
     const admin = mockAdmin({
       selectData: { status: 'ativa' },
       updateData: { id: 'c-1', status: 'suspensa', suspensa_em: '2026-07-07T00:00:00.000Z' },
     });
     vi.mocked(adminClient).mockReturnValue(admin as never);
-    const res = await POST(req({ campanhaId: 'c-1', novoStatus: 'suspensa' }));
+    const res = await POST(req(JSON.stringify({ campanhaId: 'c-1', novoStatus: 'suspensa' })));
     expect(res.status).toBe(200);
     expect(admin.update).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'suspensa', suspensa_em: expect.any(String) }),
@@ -1066,6 +1319,9 @@ export async function POST(req: Request) {
   if (erroSelect || !atual) {
     return NextResponse.json({ erro: 'campanha não encontrada' }, { status: 400 });
   }
+  if (!isStatusCampanha(atual.status)) {
+    return NextResponse.json({ erro: 'status atual da campanha é inválido' }, { status: 500 });
+  }
 
   const resultado = transicionarStatus(atual.status, novoStatus);
   if (!resultado.valida) {
@@ -1088,7 +1344,7 @@ export async function POST(req: Request) {
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/api/superadmin/campanhas/status/route.test.ts`
-Expected: PASS — 5/5
+Expected: PASS — 7/7
 
 - [ ] **Step 5: Rodar a suíte inteira do projeto**
 
@@ -1104,7 +1360,7 @@ git commit -m "feat: POST /api/superadmin/campanhas/status (mudar status)"
 
 ---
 
-### Task 4: UI — formulário de criação + botões de transição de status
+### Task 5: UI — formulário de criação + botões de transição de status
 
 **Files:**
 - Modify: `web/app/superadmin/dashboard/DashboardSuperadminClient.tsx`
@@ -1113,8 +1369,8 @@ git commit -m "feat: POST /api/superadmin/campanhas/status (mudar status)"
 **Interfaces:**
 - Consumes: `CARGOS`, `Cargo`, `ABRANGENCIAS`, `Abrangencia`
   (`web/lib/campanha/constantes.ts`, Task 1); `POST
-  /api/superadmin/campanhas` (Task 2) e `POST
-  /api/superadmin/campanhas/status` (Task 3) via `fetch`.
+  /api/superadmin/campanhas` (Task 3) e `POST
+  /api/superadmin/campanhas/status` (Task 4) via `fetch`.
 - Produces: nenhuma interface nova — comportamento observável (form +
   botões). Nenhuma task futura consome isso.
 
@@ -1671,46 +1927,63 @@ git commit -m "feat: formulário de criação + botões de transição de status
 
 ## Self-Review
 
-**1. Cobertura do spec:** decisão 1 (sem função Postgres) → Tasks 2/3
+**1. Cobertura do spec:** decisão 1 (sem função Postgres) → Tasks 3/4
 (mutação via `adminClient()` direto); decisão 2 (`POST` no arquivo do
-`GET`) → Task 2; decisão 3 (`cargo`/`abrangencia`/`status` como listas
-fechadas) → Task 1; decisão 4 (criação retorna `201` com a linha) → Task 2
-Step 3, teste "201 com a linha criada"; decisão 5 (duplicidade vira `400`)
-→ Task 2 Step 3 (`error.code === '23505'`), teste correspondente; decisão 6
-(máquina de estados) → Task 1, 6 testes de `transicionarStatus`; decisão 7
-(`suspensa_em` embutido no update) → Task 1 (mesma função, testes 3-4 do
-Step 2); decisão 8 (`transicionarStatus` valida E monta update) → Task 1;
-decisão 9 (`municipioId` numérico livre) → Task 4 Step 3 (input
-`type="number"`, sem dropdown); decisão 10 (botões mostram só transições
-legais) → Task 4 (`PROXIMOS_STATUS`), testado no Step 1; decisão 11
-(`subdominio` normaliza + valida formato) → Task 2 Step 3
-(`subdominioValido`), testado; decisão 12 (`uf` normaliza) → Task 2 Step 3,
-testado; decisão 13 (`dataEleicao` sem confiar em `Date.parse()` sozinho)
-→ Task 2 Step 3 (`dataEleicaoValida`, comparação de componentes),
-testado com os 2 casos de ano bissexto/não-bissexto; decisão 14 (rota de
-status retorna a linha) → Task 3 Step 3, teste "200 com transição válida".
-Todos os 24 itens de teste do spec → cobertos: 1-6 (Task 1), 7-15 (Task 2,
-renomeados/reordenados levemente pra bater com a implementação real —
-mesma cobertura), 16-20 (Task 3), 21-24 (Task 4). Não-objetivos:
-nenhuma task cria job de expurgo, exportação LGPD, edição de campos
-pós-criação, dropdown de município, `DELETE`, ou CSS — confirmado por
-omissão.
+`GET`) → Task 3; decisão 3 (`cargo`/`abrangencia`/`status` como listas
+fechadas) → Task 1; decisão 4 (criação retorna `201` com a linha) → Task 3;
+decisão 5 (duplicidade vira `400`) → Task 3 (`error.code === '23505'`);
+decisão 6 (máquina de estados) → Task 1; decisão 7 (`suspensa_em`
+embutido) → Task 1; decisão 8 (`transicionarStatus` valida E monta update)
+→ Task 1; decisão 9 (`municipioId` numérico livre) → Task 5 (`type=
+"number"`, sem dropdown); decisão 10 (botões mostram só transições
+legais) → Task 5 (`PROXIMOS_STATUS`); decisão 11 (`subdominio` normaliza +
+valida formato) → Tasks 2 (`validacao.ts`) + 3 (integrado via
+`validarNovaCampanha`); decisão 12 (`uf` normaliza) → idem; decisão 13
+(`dataEleicao` sem confiar em `Date.parse()` sozinho, com os 2 casos de
+ano bissexto) → Task 2 (`validacao.test.ts`); decisão 14 (rota de status
+retorna a linha) → Task 4. Todos os itens de teste do spec estão cobertos,
+reorganizados em tasks mais granulares do que o spec sugeria originalmente
+(ver "Desvios do spec" abaixo) — sem perda de cobertura, e com adições
+(purificação de `transicionarStatus`, corpo JSON inválido em ambas as
+rotas, status corrompido lido do banco). Não-objetivos: nenhuma task cria
+job de expurgo, exportação LGPD, edição de campos pós-criação, dropdown de
+município, `DELETE`, ou CSS — confirmado por omissão.
+
+**Desvios do spec, decididos durante o planejamento (revisão do usuário):**
+- `transicionarStatus` ganhou um 3º parâmetro (`agora`, com default
+  `new Date().toISOString()`) que o spec não previa — necessário pra função
+  ser de fato pura/determinística em teste, sem mudar o comportamento em
+  produção (o call site real nunca passa o 3º argumento).
+- A validação de criação de campanha, que o spec descrevia inline dentro
+  da rota `POST /api/superadmin/campanhas`, foi extraída em duas camadas
+  puras (`validacao.ts` + `validar-nova-campanha.ts`, Task 2) — a rota
+  (Task 3) ficou só wiring. Isso levou a mais uma task no total (5 em vez
+  de 4) e moveu a maior parte dos testes de validação pra fora do
+  contexto HTTP (mais rápidos, sem mock de `adminClient()`/`Request`).
+- Adicionado: rejeição de corpo JSON malformado em ambas as rotas (não
+  estava explicitamente nos itens de teste do spec, mas é consistente com
+  o padrão já usado noutras rotas do painel Superadmin desde o S7).
+- Adicionado: checagem de `isStatusCampanha(atual.status)` antes de chamar
+  `transicionarStatus`, retornando `500` se o valor lido do banco não for
+  um dos 3 status conhecidos — defesa contra dado corrompido/enum alterado
+  por fora do fluxo normal da aplicação.
 
 **2. Placeholder scan:** nenhum "TBD"/"similar à Task N sem código". Toda
-task tem código completo (teste + implementação), incluindo os 4 arquivos
+task tem código completo (teste + implementação), incluindo os 3 arquivos
 existentes reescritos por inteiro em vez de diffs parciais.
 
-**3. Consistência de tipos:** `StatusCampanha` (Task 1,
-`constantes.ts`) é usado identicamente em `transicionar-status.ts` (Task
-1, importado), na rota de status (Task 3, via `isStatusCampanha`) e no
-componente (Task 4, redeclarado localmente como union literal
-`'ativa'|'suspensa'|'encerrada'` — não importado de `constantes.ts` porque
-o componente já tem seu próprio tipo `Campanha` com o mesmo formato dos
-outros campos vindos da API, mesmo padrão do `Modulo` que também é
-importado só onde precisa, e `StatusCampanha` sendo uma union de 3 strings
-literais idêntica não corre risco de divergir). `Cargo`/`Abrangencia`
-(Task 1) usados identicamente em Task 2 (via `isCargo`/`isAbrangencia`) e
-Task 4 (importados diretamente pro `<select>`). `ResultadoTransicao` (Task
-1) é o tipo de retorno de `transicionarStatus`, consumido em Task 3 via
+**3. Consistência de tipos:** `StatusCampanha` (Task 1, `constantes.ts`) é
+usado identicamente em `transicionar-status.ts` (Task 1, importado), na
+rota de status (Task 4, via `isStatusCampanha`) e no componente (Task 5,
+redeclarado localmente como union literal — mesmo padrão de `Modulo`,
+importado só onde precisa). `Cargo`/`Abrangencia` (Task 1) usados
+identicamente em Task 2 (`validar-nova-campanha.ts`, via
+`isCargo`/`isAbrangencia`) e Task 5 (importados diretamente pro
+`<select>`). `ResultadoTransicao` (Task 1) é o tipo de retorno de
+`transicionarStatus`, consumido em Task 4 via
 `resultado.valida`/`resultado.update`/`resultado.erro` — nomes batem
-exatamente.
+exatamente. `NovaCampanhaInput`/`NovaCampanhaValidada`/
+`ResultadoValidacaoCampanha` (Task 2) são o tipo de entrada/saída de
+`validarNovaCampanha`, consumidos em Task 3 via `resultado.ok`/
+`resultado.campanha`/`resultado.erro` — nomes batem exatamente, e
+`NovaCampanhaInput` é reimportado (não redeclarado) na rota.
