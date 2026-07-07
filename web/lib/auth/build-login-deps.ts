@@ -22,6 +22,10 @@ export async function buildLoginDeps(): Promise<LoginDeps> {
     signIn: async (email, senha) => {
       const { data, error } = await ssr.auth.signInWithPassword({ email, password: senha });
       if (error || !data.user) return null;
+      // data.user.app_metadata reflete auth.users.raw_app_meta_data, não os claims
+      // injetados pelo custom_access_token_hook (S1) — campanha_id só existe nos
+      // claims do JWT emitido. getClaims() decodifica (e valida) o token da sessão
+      // recém-criada, não o app_metadata bruto do usuário.
       const { data: claimsData, error: claimsError } = await ssr.auth.getClaims();
       if (claimsError || !claimsData) return null;
       const meta = claimsData.claims.app_metadata as { campanha_id?: string };
