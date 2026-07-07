@@ -1,23 +1,36 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 vi.mock('next/headers', () => ({ cookies: vi.fn(async () => ({ getAll: () => [] })) }));
 vi.mock('../../lib/supabase/ssr', () => ({ ssrClient: vi.fn() }));
-vi.mock('./MapaCalorClient', () => ({
-  MapaCalorClient: () => 'mapa-calor-client-mock',
+
+const MapaCalorClient = vi.fn(() => 'mapa-calor-client-mock');
+vi.mock('./MapaCalorClient', () => ({ MapaCalorClient: () => MapaCalorClient() }));
+
+const REDIRECT_SENTINEL = Symbol('NEXT_REDIRECT');
+vi.mock('next/navigation', () => ({
+  redirect: vi.fn(() => {
+    throw REDIRECT_SENTINEL;
+  }),
 }));
 
 import { ssrClient } from '../../lib/supabase/ssr';
+import { redirect } from 'next/navigation';
 import Page from './page';
 
 describe('/mapa-calor page', () => {
-  it('mostra mensagem quando não autenticado, sem renderizar o mapa', async () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('redireciona pro /login quando não autenticado, sem renderizar o mapa', async () => {
     vi.mocked(ssrClient).mockReturnValue({
       auth: { getUser: async () => ({ data: { user: null }, error: null }) },
     } as never);
-    const html = renderToStaticMarkup(await Page());
-    expect(html).toContain('não autenticado');
-    expect(html).not.toContain('mapa-calor-client-mock');
+
+    await expect(Page()).rejects.toBe(REDIRECT_SENTINEL);
+    expect(redirect).toHaveBeenCalledWith('/login');
+    expect(MapaCalorClient).not.toHaveBeenCalled();
   });
 
   it('renderiza o mapa quando autenticado', async () => {
@@ -26,5 +39,6 @@ describe('/mapa-calor page', () => {
     } as never);
     const html = renderToStaticMarkup(await Page());
     expect(html).toContain('mapa-calor-client-mock');
+    expect(redirect).not.toHaveBeenCalled();
   });
 });

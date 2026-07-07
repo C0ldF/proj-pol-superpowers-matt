@@ -1,4 +1,5 @@
 import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
 import { ssrClient } from '../../lib/supabase/ssr';
 import { DashboardClient } from './DashboardClient';
 
@@ -8,7 +9,7 @@ export default async function DashboardPage() {
   const { data: { user } } = await supabase.auth.getUser();
 
   if (!user) {
-    return <p>não autenticado</p>;
+    redirect('/login');
   }
 
   return <DashboardClient />;
