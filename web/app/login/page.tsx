@@ -1,5 +1,7 @@
 'use client';
 import { useState } from 'react';
+import { Button } from '../components/Button';
+import { Input } from '../components/Input';
 
 export default function LoginPage() {
   const [identificador, setIdentificador] = useState('');
@@ -35,20 +37,39 @@ export default function LoginPage() {
   }
 
   return (
-    <form onSubmit={entrar}>
-      <input
-        value={identificador}
-        onChange={(e) => setIdentificador(e.target.value)}
-        placeholder="CPF ou e-mail"
-      />
-      <input
-        type="password"
-        value={senha}
-        onChange={(e) => setSenha(e.target.value)}
-        placeholder="Senha"
-      />
-      <button type="submit" disabled={enviando}>Entrar</button>
-      {erro && <p role="alert">{erro}</p>}
-    </form>
+    <div className="flex min-h-screen flex-col md:flex-row">
+      <div className="flex items-center justify-center bg-primary px-8 py-16 md:w-[42%]">
+        <p className="text-headline-md text-on-primary">Sistema Campanha</p>
+      </div>
+      <div className="flex flex-1 items-center justify-center bg-surface px-6 py-16 md:px-24">
+        <form onSubmit={entrar} className="flex w-full max-w-md flex-col gap-6">
+          <h1 className="text-headline-lg text-on-surface">Acesse sua conta</h1>
+          <Input
+            label="CPF ou e-mail"
+            value={identificador}
+            onChange={(e) => setIdentificador(e.target.value)}
+            placeholder="CPF ou e-mail"
+          />
+          <Input
+            label="Senha"
+            type="password"
+            value={senha}
+            onChange={(e) => setSenha(e.target.value)}
+            placeholder="Senha"
+          />
+          <Button type="submit" disabled={enviando} className="w-full">
+            Entrar
+          </Button>
+          {erro && (
+            <p
+              role="alert"
+              className="rounded bg-error-container px-4 py-3 text-body-md text-on-error-container"
+            >
+              {erro}
+            </p>
+          )}
+        </form>
+      </div>
+    </div>
   );
 }
