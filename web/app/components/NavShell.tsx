@@ -23,7 +23,7 @@ export function NavShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
-      <aside className="flex flex-row items-center justify-between gap-4 border-b border-outline-variant bg-surface-container-low px-6 py-4 md:w-[240px] md:flex-shrink-0 md:flex-col md:items-stretch md:justify-between md:border-b-0 md:border-r md:px-6 md:py-6">
+      <aside className="flex flex-row flex-wrap items-center justify-between gap-4 border-b border-outline-variant bg-surface-container-low px-6 py-4 md:w-[240px] md:flex-shrink-0 md:flex-col md:items-stretch md:justify-between md:border-b-0 md:border-r md:px-6 md:py-6">
         <div className="flex flex-row items-center gap-4 md:flex-col md:items-start md:gap-6">
           <p className="text-headline-md text-on-surface">Sistema Campanha</p>
           <nav aria-label="Navegação principal" className="flex flex-row gap-2 md:flex-col">
