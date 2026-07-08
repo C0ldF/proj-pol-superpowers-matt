@@ -42,4 +42,28 @@ describe('/superadmin/login page', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('e-mail ou senha inválidos');
     });
   });
+
+  it('desabilita o botão durante a requisição e reabilita após erro', async () => {
+    let resolveFetch: (value: { ok: boolean; json: () => Promise<{ erro?: string }> }) => void;
+    globalThis.fetch = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    ) as never;
+    render(<SuperadminLoginPage />);
+    fireEvent.change(screen.getByPlaceholderText('E-mail'), { target: { value: 'admin@x.com' } });
+    fireEvent.change(screen.getByPlaceholderText('Senha'), { target: { value: 'segredo' } });
+    fireEvent.click(screen.getByText('Entrar'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Entrar')).toBeDisabled();
+    });
+
+    resolveFetch!({ ok: false, json: async () => ({ erro: 'falhou' }) });
+
+    await waitFor(() => {
+      expect(screen.getByText('Entrar')).not.toBeDisabled();
+    });
+  });
 });
