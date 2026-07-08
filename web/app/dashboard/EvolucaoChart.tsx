@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { Message } from '../components/Message';
 
 type Ponto = { dia: string; total: number };
 
@@ -27,23 +28,33 @@ export function EvolucaoChart() {
     };
   }, []);
 
-  if (erro) return <p role="alert">{erro}</p>;
+  if (erro) return <Message variant="error">{erro}</Message>;
   if (!pontos) return null;
 
   const temMovimentacao = pontos.some((p) => p.total > 0);
   if (!temMovimentacao) {
-    return <p>Nenhuma movimentação nos últimos 90 dias.</p>;
+    return (
+      <p className="text-body-md text-on-surface-variant">
+        Nenhuma movimentação nos últimos 90 dias.
+      </p>
+    );
   }
 
   return (
-    <section>
-      <h2>Evolução (90 dias)</h2>
+    <section className="flex flex-col gap-4">
+      <h2 className="text-headline-md text-on-surface">Evolução (90 dias)</h2>
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={pontos}>
-          <XAxis dataKey="dia" />
-          <YAxis allowDecimals={false} />
+          <XAxis dataKey="dia" tick={{ fill: 'var(--color-on-surface-variant)' }} />
+          <YAxis allowDecimals={false} tick={{ fill: 'var(--color-on-surface-variant)' }} />
           <Tooltip />
-          <Line type="monotone" dataKey="total" stroke="#2563eb" dot={false} />
+          <Line
+            type="monotone"
+            dataKey="total"
+            stroke="var(--color-secondary)"
+            strokeWidth={2}
+            dot={false}
+          />
         </LineChart>
       </ResponsiveContainer>
     </section>
