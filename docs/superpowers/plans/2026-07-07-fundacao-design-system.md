@@ -544,6 +544,7 @@ Expected: FAIL — `./Button` não existe ainda (erro de import).
 
 ```tsx
 // web/app/components/Button.tsx
+'use client';
 import type { ComponentProps } from 'react';
 
 export function Button({ className = '', ...props }: ComponentProps<'button'>) {
@@ -551,11 +552,23 @@ export function Button({ className = '', ...props }: ComponentProps<'button'>) {
     <button
       type="button"
       {...props}
-      className={`inline-flex items-center justify-center rounded bg-primary px-6 py-3 text-body-md text-on-primary transition-colors hover:bg-primary/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+      className={`inline-flex items-center justify-center rounded bg-primary px-6 py-3 text-body-md text-on-primary transition-colors hover:bg-primary/90 active:bg-primary/80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
     />
   );
 }
 ```
+
+Nota: `'use client'` explícito — mesmo sem hook próprio, `Button` é um
+leaf interativo (recebe `onClick`) pensado pra reuso em fatias
+futuras, algumas das quais podem envolver páginas Server Component
+(ex.: `/dashboard`). Marcar o limite client no próprio componente
+reutilizável (em vez de depender de quem o importa já ser
+`'use client'`) é o padrão recomendado — mesmo raciocínio que já
+levou `Input` a ter `'use client'`. `active:bg-primary/80` dá feedback
+visual de pressionado (mais escuro que o hover), consistente com o
+resto do sistema (variação de opacidade/tom, sem transform de escala
+— mantém a linha austera já definida quando o elemento de assinatura
+com pontos foi descartado).
 
 Nota: `type="button"` vem ANTES do spread de `props` — se quem chamar
 passar `type="submit"` (caso do `/login`), o spread sobrescreve o
@@ -635,6 +648,17 @@ describe('Input', () => {
     render(<Input label="Senha" disabled />);
     expect(screen.getByLabelText('Senha')).toBeDisabled();
   });
+
+  it('quando error=true, o label também fica com a cor de erro (não é só a borda) — evita "cor sozinha" carregar o significado', () => {
+    render(<Input label="Senha" error />);
+    expect(screen.getByText('Senha')).toHaveClass('text-error');
+  });
+
+  it('quando error não é passado, o label usa a cor neutra padrão', () => {
+    render(<Input label="Senha" />);
+    expect(screen.getByText('Senha')).toHaveClass('text-on-surface-variant');
+    expect(screen.getByText('Senha')).not.toHaveClass('text-error');
+  });
 });
 ```
 
@@ -662,14 +686,17 @@ export function Input({ label, error = false, id, className = '', ...props }: In
 
   return (
     <div className="flex flex-col gap-1">
-      <label htmlFor={inputId} className="text-label-md text-on-surface-variant">
+      <label
+        htmlFor={inputId}
+        className={`text-label-md ${error ? 'text-error' : 'text-on-surface-variant'}`}
+      >
         {label}
       </label>
       <input
         id={inputId}
         aria-invalid={error ? true : undefined}
         {...props}
-        className={`rounded border px-4 py-3 text-body-lg text-on-surface placeholder:text-on-surface-variant bg-surface-container-lowest focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50 ${error ? 'border-error' : 'border-outline'} ${className}`}
+        className={`rounded border px-4 py-3 text-body-lg text-on-surface placeholder:text-on-surface-variant bg-surface-container-lowest transition-colors hover:border-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50 ${error ? 'border-error' : 'border-outline'} ${className}`}
       />
     </div>
   );
@@ -684,10 +711,26 @@ próprias `label`/`error`), o spread nunca os sobrescreve por acidente.
 pode ser usado dentro de formulário client-side (mesmo padrão de
 `/login`, que já é `'use client'`).
 
+O estado `error` agora tinge o **label** também (`text-error`), não só
+a borda do campo — corrige um anti-padrão real de "cor sozinha carrega
+o significado" (achado pela revisão contra a skill `ui-ux-pro-max`):
+antes, alguém com dificuldade de perceber a diferença sutil entre
+`border-outline`/`border-error` não teria nenhum outro sinal visual de
+que o campo está em erro. `aria-invalid` (que já cobre o canal
+não-visual, pra leitor de tela) permanece inalterado.
+
+`type` continua sem valor fixo — deliberado, não omissão: o campo
+`identificador` de `/login` aceita CPF OU e-mail (mesma lógica de
+`identificadorParaChave` em `web/lib/auth/login.ts`), então nenhum
+`type` semântico único (`email`, `tel`) se aplica; forçar `type="email"`
+quebraria a validação nativa do browser pra entrada de CPF numérico.
+`type="text"` (herdado via props nativas, sem default no componente)
+é a escolha correta pra esse campo especificamente.
+
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/components/Input.test.tsx`
-Expected: PASS — 6/6.
+Expected: PASS — 8/8.
 
 - [ ] **Step 5: Commit**
 
@@ -807,7 +850,7 @@ Expected: PASS — 7/7, sem alterar `page.test.tsx`.
 - [ ] **Step 3: Rodar a suíte inteira**
 
 Run: `cd web && npm test`
-Expected: 266 + 5 (Button) + 6 (Input) = 277/277 passando.
+Expected: 266 + 5 (Button) + 8 (Input) = 279/279 passando.
 
 - [ ] **Step 4: Verificação visual (Playwright, servidor de dev real)**
 
@@ -874,5 +917,21 @@ usados em Task 2-4 (`bg-primary`, `text-on-primary`, `border-outline`,
 `border-error`, `bg-surface-container-lowest`, `text-label-md`,
 `text-body-lg`, `text-body-md`, `text-headline-lg`, `text-headline-md`,
 `text-on-surface`, `text-on-surface-variant`, `text-on-error-container`,
-`bg-surface`) — todos existem como tokens definidos na Task 1, nenhum
-nome inventado fora do `@theme`.
+`text-error`, `bg-surface`, incluindo os modificadores de opacidade
+`bg-primary/90`/`bg-primary/80` e o estado `hover:border-on-surface-variant`)
+— todos existem como tokens definidos na Task 1, nenhum nome inventado
+fora do `@theme`.
+
+**4. Checagem cruzada com a skill `ui-ux-pro-max`:** revisão dos
+domínios `ux` (formulário/acessibilidade) e `nextjs` (Client/Server
+Components) contra este plano já aprovado. 4 achados reais aplicados
+(estado `hover` do `Input`, estado `active` do `Button`, canal duplo
+pro estado `error` do `Input` — não só cor de borda, `'use client'`
+explícito no `Button`); 2 achados considerados e descartados com
+justificativa registrada (tipo `text` deliberado no campo
+CPF/e-mail — nota da Task 3; colocation de componentes por rota
+contraria a convenção já estabelecida do projeto — nota da Task 1).
+O resto dos achados (Server Actions, `next/image`, `next/link`,
+`error.tsx`, skip-links, heading hierarchy) já estava coberto ou fora
+de escopo desta fatia (login não usa imagem/navegação/mutação server
+nesta restilização — lógica não muda, só apresentação).
