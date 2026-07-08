@@ -523,10 +523,14 @@ git commit -m "feat: instala Tailwind v4 e tokens de design (cor + tipografia)"
 ```tsx
 // web/app/components/Button.test.tsx
 // @vitest-environment jsdom
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { Button } from './Button';
+
+afterEach(() => {
+  cleanup();
+});
 
 describe('Button', () => {
   it('renderiza os children', () => {
@@ -557,6 +561,16 @@ describe('Button', () => {
   });
 });
 ```
+
+Nota: `afterEach(cleanup)` é obrigatório — sem ele, o DOM de um `it()`
+não é desmontado antes do próximo, e `getByRole('button')` (que exige
+exatamente 1 match) falha com "found multiple elements" a partir do
+2º teste que renderiza um botão. Projeto não tem `vitest.config.ts`
+com auto-cleanup global; o padrão já estabelecido no repo (ver
+`web/app/login/page.test.tsx`) é `afterEach(cleanup)` explícito por
+arquivo de teste — não criar `vitest.config.ts` novo pra resolver
+isso, seria configuração global não revisada afetando os outros 58
+arquivos de teste existentes.
 
 - [ ] **Step 2: Rodar e confirmar que falha**
 
@@ -636,10 +650,14 @@ git commit -m "feat: componente Button"
 ```tsx
 // web/app/components/Input.test.tsx
 // @vitest-environment jsdom
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, afterEach } from 'vitest';
+import { render, screen, cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { Input } from './Input';
+
+afterEach(() => {
+  cleanup();
+});
 
 describe('Input', () => {
   it('associa o label ao campo via htmlFor/id', () => {
