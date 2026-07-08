@@ -59,7 +59,15 @@ só. `/mapa-calor` fica de fora desta fatia inteiramente (nem o
    Link ativo (via `usePathname()`) ganha `bg-primary text-on-primary`
    (mesmo tratamento visual do `Button` primário — reforça que é a
    seleção atual); inativo: `text-on-surface-variant
-   hover:bg-surface-container`. Regra de seleção: **igualdade exata**
+   hover:bg-surface-container`, com `transition-colors` (mesmo padrão
+   já usado em `Button`/`Input` — muda de cor suavemente, não "salta").
+   Ambos os links e o botão "Sair" ganham o mesmo tratamento de foco
+   visível que `Button`/`Input` já têm: `focus-visible:outline
+   focus-visible:outline-2 focus-visible:outline-offset-2
+   focus-visible:outline-primary` — sidebar é navegação por teclado
+   tanto quanto por mouse, não pode ficar sem indicação de foco
+   quando os outros componentes interativos do projeto já têm. Regra
+   de seleção: **igualdade exata**
    entre `pathname` e o `href` do link (`pathname === href`), não
    prefixo — hoje só existem `/dashboard` e `/mapa-calor`, mas se
    surgirem sub-rotas (`/dashboard/algo`) no futuro, igualdade exata
@@ -70,8 +78,9 @@ só. `/mapa-calor` fica de fora desta fatia inteiramente (nem o
    este único caso abriria a API do componente antes de precisar de
    verdade em outro lugar. "Sair" fica um `<button>` nativo estilizado
    inline no rodapé da sidebar, discreto (`text-on-surface-variant
-   hover:text-on-surface`), sem competir visualmente com nenhuma ação
-   primária da tela.
+   hover:text-on-surface`, `transition-colors`, foco visível — ver
+   decisão 1), sem competir visualmente com nenhuma ação primária da
+   tela.
 3. **Erro dos 3 componentes do dashboard vira `Message` (fatia B)** —
    mesmo componente já usado nas 3 telas de auth. `AlertasList`,
    `EvolucaoChart`, `RankingTable` trocam `<p role="alert">{erro}</p>`
@@ -210,3 +219,10 @@ pra caber na faixa horizontal.
   — o comportamento responsivo desta fatia é só `flex-col`/`flex-row`
   via breakpoint (ver "Responsividade da sidebar" acima), sem estado
   de aberto/fechado nem JS de toggle.
+- Alternativa em tabela ou resumo textual (`aria-label`) pro
+  `EvolucaoChart` — a skill `ui-ux-pro-max` (regras `data-table`/
+  `screen-reader-summary`) recomenda que gráficos tenham uma
+  alternativa acessível pra leitor de tela, já que o SVG do `recharts`
+  sozinho não é. Fica como débito conhecido, não como esquecimento:
+  implementar agora expandiria escopo além de "restilizar" (seria
+  adicionar uma feature nova, não reapresentar uma existente).
