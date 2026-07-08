@@ -265,7 +265,7 @@ export default {
 @import "tailwindcss";
 
 @theme {
-  /* ---- Cor: 45 tokens semânticos M3 (Figma: coleção "Color") ---- */
+  /* ---- Cor: 47 tokens semânticos M3 (Figma: coleção "Color") ---- */
   --color-surface: #fbf8fa;
   --color-surface-dim: #dcd9db;
   --color-surface-bright: #fbf8fa;
@@ -416,12 +416,29 @@ body {
 ```
 
 Nota: o reset manual (`* { box-sizing: border-box; padding: 0; margin: 0; }`
-e `a { color: inherit; text-decoration: none; }`) foi removido — o
-Preflight que vem junto de `@import "tailwindcss";` já normaliza
-box-sizing/margin/padding e o estilo de link em todos os elementos,
-manter os dois seria duplicação. A media query
-`prefers-color-scheme: dark` também foi removida — sem modo escuro
-nesta fatia (Global Constraints).
+e `a { color: inherit; text-decoration: none; }`) foi removido —
+conferido linha a linha contra `node_modules/tailwindcss/preflight.css`
+(pacote `tailwindcss@4.3.2` real, não suposição): o Preflight já traz
+`*, ::after, ::before, ::backdrop, ::file-selector-button { box-sizing:
+border-box; margin: 0; padding: 0; border: 0 solid; }` e
+`a { color: inherit; -webkit-text-decoration: inherit; text-decoration:
+inherit; }` — o `text-decoration: inherit` do Preflight e o
+`text-decoration: none` do reset manual produzem o mesmo resultado
+visual aqui (nada acima de `body` define `text-decoration` diferente
+de `none`), então manter os dois seria duplicação sem ganho. A media
+query `prefers-color-scheme: dark` também foi removida — sem modo
+escuro nesta fatia (Global Constraints).
+
+Nota sobre nomenclatura: `--text-*` (tamanho/tipografia,
+ex.: `text-headline-lg`) e `--color-*` (cor, ex.: `text-on-surface`)
+são namespaces diferentes do Tailwind v4 — a classe `text-*` é
+sobrecarregada de propósito pelo próprio framework (controla
+`font-size` quando o token é `--text-*`, e `color` quando o token é
+`--color-*`). Não há conflito: o Tailwind resolve pelo namespace do
+token, não pelo prefixo da classe. Um componente pode legitimamente
+combinar as duas na mesma classe, ex.: `text-body-md text-on-surface`
+(tamanho + cor) — como acontece em `error && <p className="... text-body-md
+text-on-error-container">` na Task 4.
 
 - [ ] **Step 4: Trocar a fonte de Geist pra Inter em `web/app/layout.tsx`**
 
@@ -448,15 +465,21 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={inter.variable}>
+    <html lang="pt-BR" className={inter.variable}>
       <body>{children}</body>
     </html>
   );
 }
 ```
 
-Nota: `metadata` (título/descrição) não muda nesta fatia — não é um
-requisito do spec, fora de escopo.
+Nota: `lang="en"` → `lang="pt-BR"` — todo o sistema é em português;
+`lang` incorreto faz leitor de tela escolher pronúncia/voz errada
+pro conteúdo. Correção pequena e no mesmo arquivo que esta task já
+mexe, não é escopo novo. `metadata` (título/descrição) continua
+`"Create Next App"` — não muda nesta fatia, não é requisito do spec.
+Fica **deliberadamente** assim por enquanto (não é esquecimento): a
+aba do navegador vai mostrar "Create Next App" até uma fatia futura
+tratar disso.
 
 - [ ] **Step 5: Rodar o build e confirmar que passa**
 
@@ -572,10 +595,12 @@ com pontos foi descartado).
 
 Nota: `type="button"` vem ANTES do spread de `props` — se quem chamar
 passar `type="submit"` (caso do `/login`), o spread sobrescreve o
-default; se não passar nada, fica `"button"`. `className` é
-computado DEPOIS do spread pra sempre incluir as classes do
-componente (a classe custom passada via prop entra no fim da string,
-sem sobrescrever as classes base).
+default; se não passar nada, fica `"button"`. `className` **não** faz
+parte do spread — foi retirado de `props` no próprio destructuring da
+assinatura (`{ className = '', ...props }`), então não existe
+possibilidade de o spread sobrescrever o `className` calculado
+depois; a ordem do JSX (`{...props}` antes de `className={...}`) é só
+estilo, não é o que garante a precedência aqui.
 
 - [ ] **Step 4: Rodar e confirmar que passa**
 
@@ -659,6 +684,13 @@ describe('Input', () => {
     expect(screen.getByText('Senha')).toHaveClass('text-on-surface-variant');
     expect(screen.getByText('Senha')).not.toHaveClass('text-error');
   });
+
+  it('quando error=true, a classe de hover da borda também é a de erro (hover não pode mascarar o erro)', () => {
+    render(<Input label="Senha" error />);
+    const input = screen.getByLabelText('Senha');
+    expect(input).toHaveClass('border-error', 'hover:border-error');
+    expect(input).not.toHaveClass('hover:border-on-surface-variant');
+  });
 });
 ```
 
@@ -696,7 +728,7 @@ export function Input({ label, error = false, id, className = '', ...props }: In
         id={inputId}
         aria-invalid={error ? true : undefined}
         {...props}
-        className={`rounded border px-4 py-3 text-body-lg text-on-surface placeholder:text-on-surface-variant bg-surface-container-lowest transition-colors hover:border-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50 ${error ? 'border-error' : 'border-outline'} ${className}`}
+        className={`rounded border px-4 py-3 text-body-lg text-on-surface placeholder:text-on-surface-variant bg-surface-container-lowest transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50 ${error ? 'border-error hover:border-error' : 'border-outline hover:border-on-surface-variant'} ${className}`}
       />
     </div>
   );
@@ -727,10 +759,21 @@ quebraria a validação nativa do browser pra entrada de CPF numérico.
 `type="text"` (herdado via props nativas, sem default no componente)
 é a escolha correta pra esse campo especificamente.
 
+`hover:border-*` é condicional ao `error`, não uma classe fixa —
+bug real pego na revisão: com `hover:border-on-surface-variant` solto
+(sem depender de `error`), a especificidade CSS de um seletor com
+`:hover` (`.hover\:border-on-surface-variant:hover`) é maior que a de
+`.border-error` sozinha, então passar o mouse por cima de um campo em
+erro trocaria a borda vermelha pra cinza — a indicação de erro sumiria
+justamente na interação. Cada ramo (`error`/`!error`) agora carrega
+seu próprio par borda+hover (`border-error hover:border-error` ou
+`border-outline hover:border-on-surface-variant`), então o hover nunca
+cruza pro estado errado.
+
 - [ ] **Step 4: Rodar e confirmar que passa**
 
 Run: `cd web && npx vitest run app/components/Input.test.tsx`
-Expected: PASS — 8/8.
+Expected: PASS — 9/9.
 
 - [ ] **Step 5: Commit**
 
@@ -825,7 +868,10 @@ export default function LoginPage() {
             Entrar
           </Button>
           {erro && (
-            <p role="alert" className="text-body-md text-on-error-container">
+            <p
+              role="alert"
+              className="rounded bg-error-container px-4 py-3 text-body-md text-on-error-container"
+            >
               {erro}
             </p>
           )}
@@ -840,7 +886,22 @@ Nota: lógica de `entrar()`/estado idêntica ao arquivo original —
 somente a marcação (`return (...)`) muda. O painel esquerdo vira faixa
 horizontal em telas abaixo de `md` (`flex-col` no container raiz,
 `md:flex-row` restaura o split-screen) — decisão de implementação
-desta fatia, documentada no spec (o mockup do Figma é só desktop).
+desta fatia, documentada no spec (o mockup do Figma é só desktop). O
+banner de erro agora usa o par certo de token M3 — `bg-error-container`
+(fundo) + `text-on-error-container` (texto), não só a cor de texto
+sozinha sobre `bg-surface` — mesma lógica de "cor sozinha carrega
+significado" já corrigida no `error` do `Input`.
+
+**Sugestão considerada e descartada:** trocar o texto do botão pra
+"Entrando..." durante `enviando` melhoraria o feedback de loading, mas
+quebraria o teste existente `desabilita o botão durante a requisição e
+reabilita após erro` (`page.test.tsx`), que faz
+`getByText('Entrar')).toBeDisabled()` **durante** a requisição — com o
+texto meio-caminho seria `getByText('Entrar')` e não encontraria o
+elemento. Mudar o teste pra `getByRole('button')` resolveria, mas
+contradiz a Global Constraint desta fatia ("testes existentes... sem
+modificação"). Fica pra uma fatia futura que possa revisar esse
+constraint deliberadamente, não decidido de passagem aqui.
 
 - [ ] **Step 2: Rodar os testes existentes de `/login` e confirmar que continuam passando sem modificação**
 
@@ -850,7 +911,7 @@ Expected: PASS — 7/7, sem alterar `page.test.tsx`.
 - [ ] **Step 3: Rodar a suíte inteira**
 
 Run: `cd web && npm test`
-Expected: 266 + 5 (Button) + 8 (Input) = 279/279 passando.
+Expected: 266 + 5 (Button) + 9 (Input) = 280/280 passando.
 
 - [ ] **Step 4: Verificação visual (Playwright, servidor de dev real)**
 
@@ -917,10 +978,11 @@ usados em Task 2-4 (`bg-primary`, `text-on-primary`, `border-outline`,
 `border-error`, `bg-surface-container-lowest`, `text-label-md`,
 `text-body-lg`, `text-body-md`, `text-headline-lg`, `text-headline-md`,
 `text-on-surface`, `text-on-surface-variant`, `text-on-error-container`,
-`text-error`, `bg-surface`, incluindo os modificadores de opacidade
-`bg-primary/90`/`bg-primary/80` e o estado `hover:border-on-surface-variant`)
-— todos existem como tokens definidos na Task 1, nenhum nome inventado
-fora do `@theme`.
+`text-error`, `bg-surface`, `bg-error-container`, `on-error-container`,
+incluindo os modificadores de opacidade `bg-primary/90`/`bg-primary/80`
+e os estados condicionais `hover:border-on-surface-variant`/
+`hover:border-error`) — todos existem como tokens definidos na Task 1,
+nenhum nome inventado fora do `@theme`.
 
 **4. Checagem cruzada com a skill `ui-ux-pro-max`:** revisão dos
 domínios `ux` (formulário/acessibilidade) e `nextjs` (Client/Server

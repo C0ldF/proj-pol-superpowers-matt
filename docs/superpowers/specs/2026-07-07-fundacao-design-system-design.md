@@ -61,7 +61,7 @@ ajustada durante o processo de definição do Design System:
    Pro). Arquivo criado: "Sistema Campanha — Design System"
    (`fileKey=nrru1S5LuYK0kBxKB0vsAp`,
    https://www.figma.com/design/nrru1S5LuYK0kBxKB0vsAp). Contém:
-   - **Coleção de variáveis "Color"**: 86 variáveis — 45 tokens de cor
+   - **Coleção de variáveis "Color"**: 86 variáveis — 47 tokens de cor
      M3 do Stitch (semânticos: `primary`, `on-primary`, `surface-container-*`,
      etc.) + 3 rampas de heatmap × 13 steps (`heatmap-forca/100..700`,
      `heatmap-potencial/100..700`, `heatmap-penetracao/100..700`).
@@ -98,7 +98,7 @@ utilizada pelo projeto, conforme orientação do `web/AGENTS.md`, para
 confirmar que `@tailwindcss/postcss` continua sendo a integração
 recomendada no momento da implementação. Tokens do Figma viram:
 - `web/app/globals.css`: `@theme` block (Tailwind v4 CSS-first) com os
-  45 tokens de cor M3 + as 3 rampas (13 steps cada) como custom properties
+  47 tokens de cor M3 + as 3 rampas (13 steps cada) como custom properties
   `--color-*`, mapeadas 1:1 pros nomes das variáveis do Figma
   (`--color-primary`, `--color-heatmap-forca-450`, etc.) — nomenclatura
   kebab-case idêntica ao Figma pra rastreabilidade.
