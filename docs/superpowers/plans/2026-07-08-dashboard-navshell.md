@@ -4,7 +4,7 @@
 
 **Goal:** Restyle `NavShell` (vira sidebar esquerda de largura fixa 240px, layout estrutural das telas autenticadas) e os 3 componentes de `/dashboard` (`AlertasList`, `EvolucaoChart`, `RankingTable`) com os tokens do design system já existentes — mesma disciplina das fatias A/B (fundação + auth restante).
 
-**Architecture:** 4 tasks independentes, uma por arquivo (`NavShell.tsx`, `AlertasList.tsx`, `EvolucaoChart.tsx`, `RankingTable.tsx`). `NavShell` é a única com comportamento novo (destaque de link ativo via `usePathname()`) — as outras 3 são restilização pura de componentes já cobertos por teste, sem mudar fetch/estado/lógica.
+**Architecture:** 4 tasks independentes, uma por arquivo (`NavShell.tsx`, `AlertasList.tsx`, `EvolucaoChart.tsx`, `RankingTable.tsx`). `NavShell` é a única com comportamento novo (destaque de link ativo via `usePathname()`) — as outras 3 são restilização pura de componentes já cobertos por teste, sem mudar fetch/estado/lógica. Nas 3 tasks de restilização pura, as edições são cirúrgicas (blocos `old_string`/`new_string` que tocam só import + `return`), nunca uma reescrita do arquivo inteiro — reduz o diff e torna estruturalmente impossível alterar `useEffect`/fetch/estado por engano.
 
 **Tech Stack:** Next.js 16.2.9 (App Router), React 19, Tailwind v4 (`@theme` tokens já definidos em `web/app/globals.css`), Vitest + Testing Library, `recharts` (já uma dependência do projeto).
 
@@ -13,11 +13,13 @@
 - Nenhuma mudança de lógica de fetch/estado/decisão de texto em nenhum dos 4 arquivos — só apresentação (spec, decisão geral).
 - `Button` continua com 1 variante só — "Sair" NÃO usa `Button`, fica `<button>` nativo estilizado inline (spec, decisão 2).
 - Nenhum componente `Table` novo — `RankingTable` estiliza `<table>` direto (spec, decisão 6).
-- Nenhuma lib de ícones nova — os 2 ícones de `AlertasList` são SVG inline hand-authored no mesmo arquivo, `aria-hidden="true"` (spec, decisão 4).
-- Cor do `EvolucaoChart`: `stroke="var(--color-secondary)"` exatamente (não hex, não `"#2563eb"` antigo) — valor verificado empiricamente em browser real, é literal, não aproximação (spec, decisão 5).
-- Regra de link ativo no `NavShell`: igualdade exata `pathname === href`, nunca prefixo (spec, decisão 1).
+- Nenhuma lib de ícones nova — os 2 ícones de `AlertasList` são SVG inline hand-authored no mesmo arquivo, `aria-hidden="true"`, tamanho controlado **só** via classe Tailwind (`h-5 w-5`) — nunca atributo `width`/`height` fixo no `<svg>` (spec, decisão 4).
+- Cor do `EvolucaoChart`: `stroke="var(--color-secondary)"` exatamente (não hex, não `"#2563eb"` antigo) — valor verificado empiricamente em browser real, é literal, não aproximação (spec, decisão 5). Eixos (`XAxis`/`YAxis`) usam `tick={{ fill: 'var(--color-on-surface-variant)' }}` — sem isso os eixos ficam na cor cinza default do `recharts`, inconsistente com o resto do token system.
+- Link ativo no `NavShell`: igualdade exata `pathname === href`, nunca prefixo (spec, decisão 1). Marcado via `aria-current={ativo ? 'page' : undefined}` — não via checagem de string de classe Tailwind: `aria-current="page"` é o atributo HTML semântico pra exatamente esse caso (item de navegação corrente), e um teste que verifica esse atributo continua correto mesmo se o valor de `className` mudar depois (ex.: trocar `bg-primary` por outra classe) — testar a classe diretamente acopla o teste a um detalhe de implementação que pode mudar sem o comportamento mudar.
+- `NavShell` deixa de ser só uma barra de navegação e passa a ser o layout estrutural completo da área autenticada (sidebar + main) — isso fica documentado num comentário de uma linha no próprio arquivo, não só implícito na estrutura do JSX.
 - Breakpoint responsivo: `md` (mesmo já usado em `/login`, `/superadmin/login`, `/redefinir-senha` — não `lg`, decisão consciente de manter consistência com o resto do projeto).
 - `min-h-screen` (não `min-h-dvh`) — mesma decisão de manter consistência com as 3 telas de auth já existentes.
+- `<main>` recebe só `min-w-0 flex-1 p-6` — **sem** `overflow-x-auto` no `<main>`: a tabela de `RankingTable` já tem seu próprio `overflow-x-auto` escopado a ela; adicionar outro no `<main>` criaria uma região de scroll aninhada (anti-padrão: 2 containers com scroll horizontal um dentro do outro é confuso pro usuário e não resolve nada que o `overflow-x-auto` da tabela já não resolva sozinho).
 - Toda classe de foco visível replica exatamente o padrão já usado em `Button`/`Input`: `focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary`.
 - Nenhum teste novo em `AlertasList.test.tsx`, `EvolucaoChart.test.tsx`, `RankingTable.test.tsx` — são restilização pura, os testes existentes devem passar sem modificação. `NavShell.test.tsx` ganha exatamente 1 teste novo (link ativo) — os 3 existentes não mudam.
 
@@ -37,7 +39,7 @@
 
 Ler `web/app/components/NavShell.test.tsx` — já tem 3 casos (`renderiza os 2 links...`, `clicar em Sair dispara POST...`, `redireciona pro /login mesmo se o fetch falhar...`). Estes 3 não mudam.
 
-- [ ] **Step 2: Escrever o teste novo (4º caso) — link ativo**
+- [ ] **Step 2: Escrever o teste novo (4º caso) — link ativo, via `aria-current`**
 
 Substituir o conteúdo de `web/app/components/NavShell.test.tsx` por (adiciona `vi.mock('next/navigation', ...)` no topo e 1 novo `it(...)`, mantém os outros 3 idênticos):
 
@@ -77,10 +79,10 @@ describe('NavShell', () => {
     expect(screen.getByText('conteudo-de-teste')).toBeInTheDocument();
   });
 
-  it('destaca o link cujo href bate com o pathname atual', () => {
+  it('marca aria-current="page" só no link cujo href bate com o pathname atual', () => {
     renderNav();
-    expect(screen.getByText('Dashboard').className).toContain('bg-primary');
-    expect(screen.getByText('Mapa de Calor').className).not.toContain('bg-primary');
+    expect(screen.getByText('Dashboard')).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByText('Mapa de Calor')).not.toHaveAttribute('aria-current');
   });
 
   it('clicar em Sair dispara POST /api/auth/logout e redireciona pro /login', async () => {
@@ -112,7 +114,7 @@ describe('NavShell', () => {
 - [ ] **Step 3: Rodar e confirmar que o teste novo falha**
 
 Run: `cd web && npx vitest run app/components/NavShell.test.tsx`
-Expected: FAIL — o 2º caso ("destaca o link...") falha porque `NavShell.tsx` ainda não tem classe nenhuma nos links (className vazio, `.toContain('bg-primary')` falha). Os outros 3 casos continuam passando (comportamento de logout não mudou ainda).
+Expected: FAIL — o 2º caso ("marca aria-current...") falha porque `NavShell.tsx` ainda não seta `aria-current` em nenhum link. Os outros 3 casos continuam passando (comportamento de logout não mudou ainda).
 
 - [ ] **Step 4: Implementar a sidebar**
 
@@ -136,6 +138,9 @@ const LINKS = [
 const focoVisivel =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary';
 
+// NavShell é o layout estrutural das telas autenticadas (sidebar + área
+// principal), não só uma barra de navegação — /dashboard e /mapa-calor
+// dependem dele pra essa estrutura inteira.
 export function NavShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
@@ -144,13 +149,14 @@ export function NavShell({ children }: { children: React.ReactNode }) {
       <aside className="flex flex-row items-center justify-between gap-4 border-b border-outline-variant bg-surface-container-low px-6 py-4 md:w-[240px] md:flex-shrink-0 md:flex-col md:items-stretch md:justify-between md:border-b-0 md:border-r md:px-6 md:py-6">
         <div className="flex flex-row items-center gap-4 md:flex-col md:items-start md:gap-6">
           <p className="text-headline-md text-on-surface">Sistema Campanha</p>
-          <nav className="flex flex-row gap-2 md:flex-col">
+          <nav aria-label="Navegação principal" className="flex flex-row gap-2 md:flex-col">
             {LINKS.map((link) => {
               const ativo = pathname === link.href;
               return (
                 <Link
                   key={link.href}
                   href={link.href}
+                  aria-current={ativo ? 'page' : undefined}
                   className={`rounded px-4 py-2 text-body-md transition-colors ${focoVisivel} ${
                     ativo
                       ? 'bg-primary text-on-primary'
@@ -194,7 +200,7 @@ git commit -m "feat: restiliza NavShell como sidebar com destaque de rota ativa"
 ### Task 2: `AlertasList` — cards com ícone de severidade
 
 **Files:**
-- Modify: `web/app/dashboard/AlertasList.tsx`
+- Modify: `web/app/dashboard/AlertasList.tsx` (edição cirúrgica — `useEffect`/fetch/estado ficam intocados)
 
 **Interfaces:**
 - Consumes: `Message` (`web/app/components/Message.tsx`, já existe desde a fatia B — `variant: 'error' | 'success'`).
@@ -205,12 +211,26 @@ git commit -m "feat: restiliza NavShell como sidebar com destaque de rota ativa"
 Run: `cd web && npx vitest run app/dashboard/AlertasList.test.tsx`
 Expected: PASS — 3/3 (baseline antes da mudança).
 
-- [ ] **Step 2: Implementar os cards**
+- [ ] **Step 2: Edit — adicionar o import de `Message` e os 2 ícones**
 
-Substituir o conteúdo de `web/app/dashboard/AlertasList.tsx` por:
+Em `web/app/dashboard/AlertasList.tsx`, trocar:
 
 ```tsx
-'use client';
+import { useEffect, useState } from 'react';
+
+type Alerta = {
+  tipo: 'area' | 'lideranca_estagnada';
+  alvo_id: string;
+  label: string;
+  detalhe: Record<string, unknown>;
+};
+
+export function AlertasList() {
+```
+
+por:
+
+```tsx
 import { useEffect, useState } from 'react';
 import { Message } from '../components/Message';
 
@@ -258,28 +278,42 @@ function IconLideranca() {
 }
 
 export function AlertasList() {
-  const [alertas, setAlertas] = useState<Alerta[] | null>(null);
-  const [erro, setErro] = useState<string | null>(null);
+```
 
-  useEffect(() => {
-    let cancelado = false;
-    setErro(null);
-    fetch('/api/dashboard/alertas')
-      .then((res) => {
-        if (!res.ok) throw new Error('falha ao carregar alertas');
-        return res.json();
-      })
-      .then((data: Alerta[]) => {
-        if (!cancelado) setAlertas(data);
-      })
-      .catch(() => {
-        if (!cancelado) setErro('Não foi possível carregar os alertas.');
-      });
-    return () => {
-      cancelado = true;
-    };
-  }, []);
+**Não muda:** o `useState`/`useEffect`/fetch logo abaixo continuam byte-a-byte idênticos — esta edição só adiciona código antes deles, não toca neles.
 
+- [ ] **Step 3: Edit — trocar o render (erro/vazio/lista)**
+
+No mesmo arquivo, trocar:
+
+```tsx
+  if (erro) return <p role="alert">{erro}</p>;
+  if (!alertas) return null;
+
+  if (alertas.length === 0) {
+    return <p>Nenhum alerta no momento.</p>;
+  }
+
+  return (
+    <section>
+      <h2>Alertas</h2>
+      <ul>
+        {alertas.map((a) => (
+          <li key={`${a.tipo}-${a.alvo_id}`}>
+            {a.tipo === 'area'
+              ? `Zona ${a.label}: potencial acima da média com baixa penetração.`
+              : `${a.label}: sem crescimento na sub-árvore nos últimos 30 dias.`}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+```
+
+por:
+
+```tsx
   if (erro) return <Message variant="error">{erro}</Message>;
   if (!alertas) return null;
 
@@ -310,12 +344,12 @@ export function AlertasList() {
 }
 ```
 
-- [ ] **Step 3: Rodar e confirmar que os 3 testes continuam passando**
+- [ ] **Step 4: Rodar e confirmar que os 3 testes continuam passando**
 
 Run: `cd web && npx vitest run app/dashboard/AlertasList.test.tsx`
 Expected: PASS — 3/3 (texto idêntico ao anterior em todos os 3 casos: os 2 tipos, estado vazio, erro — `Message` produz o mesmo `role="alert"` que o `<p role="alert">` anterior).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add web/app/dashboard/AlertasList.tsx
@@ -327,7 +361,7 @@ git commit -m "feat: restiliza AlertasList como cards com ícone de severidade"
 ### Task 3: `EvolucaoChart` — cor do design system
 
 **Files:**
-- Modify: `web/app/dashboard/EvolucaoChart.tsx`
+- Modify: `web/app/dashboard/EvolucaoChart.tsx` (edição cirúrgica — `useEffect`/fetch/estado ficam intocados)
 
 **Interfaces:**
 - Consumes: `Message` (`web/app/components/Message.tsx`).
@@ -338,42 +372,59 @@ git commit -m "feat: restiliza AlertasList como cards com ícone de severidade"
 Run: `cd web && npx vitest run app/dashboard/EvolucaoChart.test.tsx`
 Expected: PASS — 3/3 (baseline antes da mudança).
 
-- [ ] **Step 2: Implementar a cor e a tipografia**
+- [ ] **Step 2: Edit — adicionar o import de `Message`**
 
-Substituir o conteúdo de `web/app/dashboard/EvolucaoChart.tsx` por:
+Em `web/app/dashboard/EvolucaoChart.tsx`, trocar:
 
 ```tsx
-// web/app/dashboard/EvolucaoChart.tsx
-'use client';
-import { useEffect, useState } from 'react';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+
+type Ponto = { dia: string; total: number };
+```
+
+por:
+
+```tsx
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { Message } from '../components/Message';
 
 type Ponto = { dia: string; total: number };
+```
 
-export function EvolucaoChart() {
-  const [pontos, setPontos] = useState<Ponto[] | null>(null);
-  const [erro, setErro] = useState<string | null>(null);
+**Não muda:** o `useState`/`useEffect`/fetch continuam byte-a-byte idênticos.
 
-  useEffect(() => {
-    let cancelado = false;
-    setErro(null);
-    fetch('/api/dashboard/evolucao')
-      .then((res) => {
-        if (!res.ok) throw new Error('falha ao carregar evolução');
-        return res.json();
-      })
-      .then((data: Ponto[]) => {
-        if (!cancelado) setPontos(data);
-      })
-      .catch(() => {
-        if (!cancelado) setErro('Não foi possível carregar a evolução.');
-      });
-    return () => {
-      cancelado = true;
-    };
-  }, []);
+- [ ] **Step 3: Edit — trocar o render (erro/vazio/gráfico)**
 
+No mesmo arquivo, trocar:
+
+```tsx
+  if (erro) return <p role="alert">{erro}</p>;
+  if (!pontos) return null;
+
+  const temMovimentacao = pontos.some((p) => p.total > 0);
+  if (!temMovimentacao) {
+    return <p>Nenhuma movimentação nos últimos 90 dias.</p>;
+  }
+
+  return (
+    <section>
+      <h2>Evolução (90 dias)</h2>
+      <ResponsiveContainer width="100%" height={300}>
+        <LineChart data={pontos}>
+          <XAxis dataKey="dia" />
+          <YAxis allowDecimals={false} />
+          <Tooltip />
+          <Line type="monotone" dataKey="total" stroke="#2563eb" dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </section>
+  );
+}
+```
+
+por:
+
+```tsx
   if (erro) return <Message variant="error">{erro}</Message>;
   if (!pontos) return null;
 
@@ -391,8 +442,8 @@ export function EvolucaoChart() {
       <h2 className="text-headline-md text-on-surface">Evolução (90 dias)</h2>
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={pontos}>
-          <XAxis dataKey="dia" />
-          <YAxis allowDecimals={false} />
+          <XAxis dataKey="dia" tick={{ fill: 'var(--color-on-surface-variant)' }} />
+          <YAxis allowDecimals={false} tick={{ fill: 'var(--color-on-surface-variant)' }} />
           <Tooltip />
           <Line
             type="monotone"
@@ -408,16 +459,16 @@ export function EvolucaoChart() {
 }
 ```
 
-- [ ] **Step 3: Rodar e confirmar que os 3 testes continuam passando**
+- [ ] **Step 4: Rodar e confirmar que os 3 testes continuam passando**
 
 Run: `cd web && npx vitest run app/dashboard/EvolucaoChart.test.tsx`
 Expected: PASS — 3/3.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add web/app/dashboard/EvolucaoChart.tsx
-git commit -m "feat: EvolucaoChart usa cor secondary do design system"
+git commit -m "feat: EvolucaoChart usa cor secondary e tick color do design system"
 ```
 
 ---
@@ -425,7 +476,7 @@ git commit -m "feat: EvolucaoChart usa cor secondary do design system"
 ### Task 4: `RankingTable` — tabela com tokens
 
 **Files:**
-- Modify: `web/app/dashboard/RankingTable.tsx`
+- Modify: `web/app/dashboard/RankingTable.tsx` (edição cirúrgica — `useEffect`/fetch/estado ficam intocados)
 
 **Interfaces:**
 - Consumes: `Message` (`web/app/components/Message.tsx`).
@@ -436,9 +487,18 @@ git commit -m "feat: EvolucaoChart usa cor secondary do design system"
 Run: `cd web && npx vitest run app/dashboard/RankingTable.test.tsx`
 Expected: PASS — 4/4 (baseline antes da mudança).
 
-- [ ] **Step 2: Implementar a tabela estilizada**
+- [ ] **Step 2: Edit — adicionar o import de `Message`**
 
-Substituir o conteúdo de `web/app/dashboard/RankingTable.tsx` por:
+Em `web/app/dashboard/RankingTable.tsx`, trocar:
+
+```tsx
+'use client';
+import { useEffect, useState } from 'react';
+
+type RankingRow = {
+```
+
+por:
 
 ```tsx
 'use client';
@@ -446,36 +506,57 @@ import { useEffect, useState } from 'react';
 import { Message } from '../components/Message';
 
 type RankingRow = {
-  pessoa_id: string;
-  nome: string;
-  subarvore_count: number;
-  soma_ramos: number;
-  total_real: number;
-};
+```
 
-export function RankingTable() {
-  const [linhas, setLinhas] = useState<RankingRow[] | null>(null);
-  const [erro, setErro] = useState<string | null>(null);
+**Não muda:** o `useState`/`useEffect`/fetch continuam byte-a-byte idênticos.
 
-  useEffect(() => {
-    let cancelado = false;
-    setErro(null);
-    fetch('/api/dashboard/ranking')
-      .then((res) => {
-        if (!res.ok) throw new Error('falha ao carregar ranking');
-        return res.json();
-      })
-      .then((data: RankingRow[]) => {
-        if (!cancelado) setLinhas(data);
-      })
-      .catch(() => {
-        if (!cancelado) setErro('Não foi possível carregar o ranking.');
-      });
-    return () => {
-      cancelado = true;
-    };
-  }, []);
+- [ ] **Step 3: Edit — trocar o render (erro/vazio/tabela)**
 
+No mesmo arquivo, trocar:
+
+```tsx
+  if (erro) return <p role="alert">{erro}</p>;
+  if (!linhas) return null;
+
+  if (linhas.length === 0) {
+    return <p>Nenhum líder com sub-árvore ainda.</p>;
+  }
+
+  const { soma_ramos, total_real } = linhas[0];
+
+  return (
+    <section>
+      <h2>Ranking de lideranças</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Nome</th>
+            <th>Tamanho da sub-árvore</th>
+          </tr>
+        </thead>
+        <tbody>
+          {linhas.map((l) => (
+            <tr key={l.pessoa_id}>
+              <td>{l.nome}</td>
+              <td>{l.subarvore_count}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p>
+        Soma dos ramos: {soma_ramos} · Total real da campanha: {total_real}
+        {soma_ramos !== total_real && (
+          <> · {soma_ramos - total_real} apoiador(es) compartilhado(s) entre ramos.</>
+        )}
+      </p>
+    </section>
+  );
+}
+```
+
+por:
+
+```tsx
   if (erro) return <Message variant="error">{erro}</Message>;
   if (!linhas) return null;
 
@@ -493,14 +574,16 @@ export function RankingTable() {
           <thead className="bg-surface-container-low">
             <tr>
               <th className="px-4 py-2 font-medium">Nome</th>
-              <th className="px-4 py-2 font-medium">Tamanho da sub-árvore</th>
+              <th className="px-4 py-2 text-right font-medium">Tamanho da sub-árvore</th>
             </tr>
           </thead>
           <tbody>
             {linhas.map((l) => (
               <tr key={l.pessoa_id} className="border-t border-outline-variant">
                 <td className="px-4 py-2">{l.nome}</td>
-                <td className="px-4 py-2 text-data-mono tabular-nums">{l.subarvore_count}</td>
+                <td className="px-4 py-2 text-right text-data-mono tabular-nums">
+                  {l.subarvore_count}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -517,16 +600,18 @@ export function RankingTable() {
 }
 ```
 
-- [ ] **Step 3: Rodar e confirmar que os 4 testes continuam passando**
+(o espaçamento entre a tabela e o parágrafo de resumo já vem do `gap-4` no `<section>` — não precisa de margem extra.)
+
+- [ ] **Step 4: Rodar e confirmar que os 4 testes continuam passando**
 
 Run: `cd web && npx vitest run app/dashboard/RankingTable.test.tsx`
 Expected: PASS — 4/4.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add web/app/dashboard/RankingTable.tsx
-git commit -m "feat: restiliza RankingTable com tokens e tabular-nums"
+git commit -m "feat: restiliza RankingTable com tokens, tabular-nums e alinhamento à direita"
 ```
 
 ---
@@ -538,10 +623,10 @@ git commit -m "feat: restiliza RankingTable com tokens e tabular-nums"
 **Interfaces:**
 - Consumes: servidor de dev rodando (`npm run dev`), as 4 tasks anteriores completas.
 
-- [ ] **Step 1: Rodar a suite inteira**
+- [ ] **Step 1: Rodar a suite inteira (integração das 4 tasks)**
 
 Run: `cd web && npm test`
-Expected: PASS — todos os testes do projeto (não só os 4 arquivos desta fatia).
+Expected: PASS — todos os testes do projeto (não só os 4 arquivos desta fatia). Esta é a checagem de integração final — não precisa de commit próprio porque nenhum arquivo de produto muda aqui, só verificação.
 
 - [ ] **Step 2: Subir o servidor de dev**
 
@@ -551,23 +636,36 @@ Expected: `Ready` sem erro.
 - [ ] **Step 3: Screenshot desktop (≥768px) de `/dashboard`**
 
 Usar Playwright MCP (`browser_navigate` + `browser_resize` pra ~1280x800 + `browser_take_screenshot`) contra `http://localhost:<porta>/dashboard` (autenticado — usar sessão/cookie de teste já estabelecida no projeto, mesmo padrão das fatias anteriores).
-Verificar visualmente: sidebar à esquerda (240px), link "Dashboard" destacado (`bg-primary`), "Mapa de Calor" não destacado, cards de alerta com ícone visível (se houver dados), tabela com coluna numérica alinhada à direita/monoespaçada, gráfico com linha teal (`secondary`).
+Verificar visualmente:
+- sidebar à esquerda (240px), link "Dashboard" destacado (`bg-primary`), "Mapa de Calor" não destacado;
+- cards de alerta com ícone visível (se houver dados);
+- tabela com coluna numérica alinhada à direita, monoespaçada;
+- gráfico com linha teal (`secondary`), eixos na cor `on-surface-variant` (não cinza default do recharts);
+- **contraste**: texto da sidebar/cards/tabela legível contra o fundo (checagem visual, os pares de token já foram validados matematicamente na fundação — aqui é só confirmar que a combinação nova de tokens não ficou visualmente estranha);
+- **hover**: passar o mouse nos links da sidebar e no botão "Sair" — muda de cor suavemente (`transition-colors`), sem "salto".
 
-- [ ] **Step 4: Screenshot mobile (<768px) de `/dashboard`**
+- [ ] **Step 4: Verificação de teclado (foco visível)**
+
+Usar `browser_press_key` (Tab repetido) navegando pela sidebar — confirmar que cada link e o botão "Sair" mostram o anel de foco (`focus-visible:outline`) na ordem visual esperada (wordmark não é focável, depois os 2 links, depois "Sair").
+
+- [ ] **Step 5: Screenshot mobile (<768px) de `/dashboard`**
 
 `browser_resize` pra ~375x800, `browser_take_screenshot`.
-Verificar visualmente: sidebar vira faixa horizontal no topo (wordmark + nav + Sair lado a lado), conteúdo principal abaixo, sem scroll horizontal na página.
+Verificar visualmente:
+- sidebar vira faixa horizontal no topo (wordmark + nav + Sair lado a lado);
+- conteúdo principal abaixo;
+- **sem scroll horizontal na página** (a tabela deve rolar dentro do seu próprio `overflow-x-auto`, não estourar a largura da tela).
 
-- [ ] **Step 5: Reportar quaisquer divergências visuais encontradas**
+- [ ] **Step 6: Reportar quaisquer divergências visuais encontradas**
 
-Se algo não bater com o esperado (ex.: overlap, texto cortado, cor errada), corrigir antes de finalizar a fatia — não é uma nova task, é ajuste dentro da task correspondente (1-4) que introduziu o problema.
+Se algo não bater com o esperado (ex.: overlap, texto cortado, cor errada, foco ausente, scroll horizontal na página), corrigir antes de finalizar a fatia — não é uma nova task, é ajuste dentro da task correspondente (1-4) que introduziu o problema.
 
 ---
 
 ## Self-Review (preenchido pelo autor do plano)
 
-**Cobertura do spec:** decisão 1 (sidebar+link ativo+foco+transição) → Task 1. Decisão 2 (Sair sem `Button`) → Task 1. Decisão 3 (`Message` nos 3 componentes) → Tasks 2/3/4. Decisão 4 (cards+ícones) → Task 2. Decisão 5 (`dataviz`, cor `secondary`) → Task 3. Decisão 6 (tabela sem componente novo, `tabular-nums`) → Task 4. Responsividade da sidebar → Task 1 (classes `md:`) + Task 5 (verificação visual real nos 2 tamanhos). Débito documentado (tabela/resumo acessível do gráfico) → não vira task, propositalmente (spec já registra como fora de escopo).
+**Cobertura do spec:** decisão 1 (sidebar+link ativo+foco+transição) → Task 1. Decisão 2 (Sair sem `Button`) → Task 1. Decisão 3 (`Message` nos 3 componentes) → Tasks 2/3/4. Decisão 4 (cards+ícones) → Task 2. Decisão 5 (`dataviz`, cor `secondary` + tick color) → Task 3. Decisão 6 (tabela sem componente novo, `tabular-nums`, alinhamento) → Task 4. Responsividade da sidebar → Task 1 (classes `md:`) + Task 5 (verificação visual real nos 2 tamanhos, incluindo ausência de scroll horizontal). Foco de teclado (achado da revisão ui-ux-pro-max) → Task 1 (implementação) + Task 5 Step 4 (verificação real via teclado). Débito documentado (tabela/resumo acessível do gráfico) → não vira task, propositalmente (spec já registra como fora de escopo).
 
-**Placeholder scan:** nenhum "TBD"/"depois" — todo código é completo e literal, copiado das decisões do spec.
+**Placeholder scan:** nenhum "TBD"/"depois" — todo código é completo e literal, copiado das decisões do spec. Os blocos `old_string` das Tasks 2-4 foram conferidos contra o conteúdo atual real dos 3 arquivos (lido diretamente durante o brainstorming desta fatia), não reconstruídos de memória.
 
 **Consistência de tipos:** `Alerta`, `Ponto`, `RankingRow` mantêm os mesmos nomes/campos do código atual (não removidos nem renomeados) — só a função de renderização muda em cada task.
