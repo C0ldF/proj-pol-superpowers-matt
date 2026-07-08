@@ -80,8 +80,8 @@ específica de cada fluxo. Ver seção "Padrão visual" abaixo.
    `/redefinir-senha` mostra "Sistema Campanha" (mesma identidade do
    `/login`, é fluxo de campanha); `/superadmin/login` mostra "Painel
    Superadmin" (identidade separada, sem vínculo a nenhuma campanha
-   específica — mesma separação de identidade já estabelecida desde o
-   S7).
+   específica), mantendo a separação entre autenticação de campanha e
+   autenticação institucional introduzida no S7.
 
 4. **Headings são escolhidos de forma a não duplicar o texto de labels
    ou botões**, preservando consultas inequívocas nos testes (`getByText`
@@ -121,19 +121,20 @@ interface MessageProps {
 ```
 Componente puro, sem estado. A única responsabilidade do componente é
 mapear `variant` pra semântica (`role`) e tokens visuais — nada mais.
-Sem prop de `role` separada — só 2 variantes existem no produto hoje,
-expor `role` como prop independente seria abstração sem uso real
-(YAGNI).
+Não recebe `className`, `role` ou qualquer prop de estilo — o
+componente encapsula completamente sua apresentação; expor essas props
+seria permitir expansão futura sem uma decisão consciente. Sem prop de
+`role` separada — só 2 variantes existem no produto hoje, expor `role`
+como prop independente seria abstração sem uso real (YAGNI).
 
 **`/superadmin/login`:** adiciona `const [enviando, setEnviando] =
-useState(false)`; `entrar()` chama `setEnviando(true)` antes do
-`fetch`, `setEnviando(false)` nos caminhos de erro (replica
-exatamente o padrão já usado em `/login`, incluindo o comentário sobre
-o caminho de sucesso ficar desabilitado porque a página já está
-navegando). `Button` recebe `disabled={enviando}` mas **mantém o texto
-"Entrar"** durante o envio (não vira "Entrando..." nem qualquer outra
-variação) — mesmo padrão exato do `/login`, cujo texto de botão também
-não muda durante `enviando`. Erro vira `<Message variant="error">`.
+useState(false)`. Replica exatamente o fluxo de estado do `/login`:
+desabilita antes do request, reabilita apenas nos caminhos de erro; no
+sucesso a navegação desmonta a página, então não há caminho de
+reabilitação nesse caso. `Button` recebe `disabled={enviando}` mas
+**mantém o texto "Entrar"** durante o envio (não vira "Entrando..." nem
+qualquer outra variação) — mesmo padrão exato do `/login`. Erro vira
+`<Message variant="error">`.
 
 **`/redefinir-senha`:** troca o `<p>{msg}</p>` genérico por um
 discriminador de resultado — em vez de um `msg: string` solto, o
@@ -146,9 +147,7 @@ mensagem de uma tentativa anterior (sucesso ou erro) continue visível
 durante uma nova tentativa em andamento. Campo de senha vira `Input`
 (`label="Nova senha"`, `type="password"`, `autoComplete="new-password"`
 — habilita o gerenciador de senhas do navegador a sugerir/preencher
-corretamente; **não** ganha `required`, que mudaria o comportamento de
-submissão do form — o campo vazio hoje é validado apenas no backend,
-manter assim). Botão vira `Button` (`type="submit"`, sem `disabled` —
+corretamente). Botão vira `Button` (`type="submit"`, sem `disabled` —
 não ganha loading state nesta fatia, ver decisão 1).
 
 ## Testes
