@@ -14,22 +14,27 @@ export default function SuperadminLoginPage() {
     e.preventDefault();
     setErro(null);
     setEnviando(true);
-    const res = await fetch('/api/superadmin/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email, senha }),
-    });
-    if (!res.ok) {
-      // res.json() assume corpo JSON válido — comportamento idêntico
-      // ao arquivo original (nunca tratou resposta não-JSON). Não é
-      // uma das 3 lacunas combinadas desta fatia; preservado
-      // deliberadamente, não é um bug esquecido.
-      const body = await res.json();
+    try {
+      const res = await fetch('/api/superadmin/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, senha }),
+      });
+      if (res.ok) {
+        window.location.href = '/superadmin/dashboard';
+        return; // fica desabilitado — a página já está navegando embora
+      }
+      let body: { erro?: string } = {};
+      try {
+        body = await res.json();
+      } catch {
+        // resposta de erro sem JSON válido — cai no fallback abaixo
+      }
       setErro(body.erro ?? 'Não foi possível entrar.');
-      setEnviando(false);
-      return;
+    } catch {
+      setErro('Não foi possível entrar.'); // fetch rejeitou (falha de rede)
     }
-    window.location.href = '/superadmin/dashboard';
+    setEnviando(false);
   }
 
   return (
