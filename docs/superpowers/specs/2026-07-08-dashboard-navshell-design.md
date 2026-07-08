@@ -186,8 +186,13 @@ pra caber na faixa horizontal.
 ## Testes
 
 - `web/app/components/NavShell.test.tsx` (3 casos existentes) — não
-  modificado, continua passando sem alteração (texto dos links/botão
-  idêntico, comportamento de logout idêntico).
+  modificados, continuam passando sem alteração (texto dos links/botão
+  idêntico, comportamento de logout idêntico). Teste novo (4º caso):
+  o link cujo `href` bate com o pathname atual recebe a classe de
+  estado ativo, o outro não — é comportamento novo (a seleção de
+  classe por rota não existia antes), não só reapresentação, por isso
+  precisa de teste, diferente dos outros 3 componentes desta fatia
+  que são restilização pura.
 - `web/app/dashboard/AlertasList.test.tsx` (3 casos existentes) — não
   modificado.
 - `web/app/dashboard/EvolucaoChart.test.tsx` (3 casos existentes) —
