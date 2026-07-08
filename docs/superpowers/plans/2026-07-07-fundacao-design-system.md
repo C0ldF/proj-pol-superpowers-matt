@@ -868,7 +868,7 @@ export default function LoginPage() {
       </div>
       <div className="flex flex-1 items-center justify-center bg-surface px-6 py-16 md:px-24">
         <form onSubmit={entrar} className="flex w-full max-w-md flex-col gap-6">
-          <h1 className="text-headline-lg text-on-surface">Entrar</h1>
+          <h1 className="text-headline-lg text-on-surface">Acesse sua conta</h1>
           <Input
             label="CPF ou e-mail"
             value={identificador}
@@ -909,6 +909,17 @@ banner de erro agora usa o par certo de token M3 — `bg-error-container`
 (fundo) + `text-on-error-container` (texto), não só a cor de texto
 sozinha sobre `bg-surface` — mesma lógica de "cor sozinha carrega
 significado" já corrigida no `error` do `Input`.
+
+O `<h1>` diz "Acesse sua conta", não "Entrar" — achado real na
+execução: o mockup do Figma tinha literalmente "Entrar" no heading
+(igual ao texto do botão), mas os 7 testes existentes de
+`page.test.tsx` usam `getByText('Entrar')` (não `getByRole('button',
+{ name: 'Entrar' })`) pra achar e clicar no botão — com os dois
+elementos dizendo "Entrar", o Testing Library reclama de múltiplos
+matches e os 7 testes quebram. A Global Constraint trava os testes
+existentes sem modificação, então o heading muda de texto (mantém o
+estilo `text-headline-lg`, só troca a cópia) — o botão continua
+"Entrar" (é o que os testes exigem).
 
 **Sugestão considerada e descartada:** trocar o texto do botão pra
 "Entrando..." durante `enviando` melhoraria o feedback de loading, mas
