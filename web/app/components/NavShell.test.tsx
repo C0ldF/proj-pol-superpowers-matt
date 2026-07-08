@@ -5,6 +5,8 @@ import '@testing-library/jest-dom/vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { NavShell } from './NavShell';
 
+vi.mock('next/navigation', () => ({ usePathname: () => '/dashboard' }));
+
 function renderNav() {
   return render(
     <NavShell>
@@ -29,6 +31,12 @@ describe('NavShell', () => {
     expect(screen.getByText('Mapa de Calor')).toHaveAttribute('href', '/mapa-calor');
     expect(screen.getByText('Dashboard')).toHaveAttribute('href', '/dashboard');
     expect(screen.getByText('conteudo-de-teste')).toBeInTheDocument();
+  });
+
+  it('marca aria-current="page" só no link cujo href bate com o pathname atual', () => {
+    renderNav();
+    expect(screen.getByText('Dashboard')).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByText('Mapa de Calor')).not.toHaveAttribute('aria-current');
   });
 
   it('clicar em Sair dispara POST /api/auth/logout e redireciona pro /login', async () => {
