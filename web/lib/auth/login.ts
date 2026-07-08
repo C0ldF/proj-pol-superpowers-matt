@@ -44,7 +44,7 @@ export function identificadorParaChave(
 export async function loginCampanha(input: LoginInput, deps: LoginDeps): Promise<{ ok: boolean }> {
   const { identificador, senha, subdominio, ip } = input;
   const campanhaId = await deps.campanhaIdPorSubdominio(subdominio);
-  if (!campanhaId) return { ok: false }; // middleware já deveria ter barrado
+  if (!campanhaId) return { ok: false }; // proxy já deveria ter barrado
 
   const resolvido = identificadorParaChave(identificador, deps.cpfHmac);
   if (resolvido.tipo === 'cpf_invalido') {
