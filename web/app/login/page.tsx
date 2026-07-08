@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { Button } from '../components/Button';
 import { Input } from '../components/Input';
+import { Message } from '../components/Message';
 
 export default function LoginPage() {
   const [identificador, setIdentificador] = useState('');
@@ -60,14 +61,7 @@ export default function LoginPage() {
           <Button type="submit" disabled={enviando} className="w-full">
             Entrar
           </Button>
-          {erro && (
-            <p
-              role="alert"
-              className="rounded bg-error-container px-4 py-3 text-body-md text-on-error-container"
-            >
-              {erro}
-            </p>
-          )}
+          {erro && <Message variant="error">{erro}</Message>}
         </form>
       </div>
     </div>
