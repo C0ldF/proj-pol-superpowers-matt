@@ -125,6 +125,8 @@
   --text-label-md--letter-spacing: 0.01em;
   --text-label-md--font-weight: 500;
 
+  /* "mono" é o nome do estilo no Figma, não uma fonte monoespaçada — usa Inter;
+     para alinhamento numérico em tabelas, combine com a utility `tabular-nums` do Tailwind. */
   --text-data-mono: 14px;
   --text-data-mono--line-height: 20px;
   --text-data-mono--letter-spacing: -0.01em;
