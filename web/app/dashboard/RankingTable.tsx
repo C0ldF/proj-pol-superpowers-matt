@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { Message } from '../components/Message';
 
 type RankingRow = {
   pessoa_id: string;
@@ -32,35 +33,39 @@ export function RankingTable() {
     };
   }, []);
 
-  if (erro) return <p role="alert">{erro}</p>;
+  if (erro) return <Message variant="error">{erro}</Message>;
   if (!linhas) return null;
 
   if (linhas.length === 0) {
-    return <p>Nenhum líder com sub-árvore ainda.</p>;
+    return <p className="text-body-md text-on-surface-variant">Nenhum líder com sub-árvore ainda.</p>;
   }
 
   const { soma_ramos, total_real } = linhas[0];
 
   return (
-    <section>
-      <h2>Ranking de lideranças</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Nome</th>
-            <th>Tamanho da sub-árvore</th>
-          </tr>
-        </thead>
-        <tbody>
-          {linhas.map((l) => (
-            <tr key={l.pessoa_id}>
-              <td>{l.nome}</td>
-              <td>{l.subarvore_count}</td>
+    <section className="flex flex-col gap-4">
+      <h2 className="text-headline-md text-on-surface">Ranking de lideranças</h2>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-body-md text-on-surface">
+          <thead className="bg-surface-container-low">
+            <tr>
+              <th className="px-4 py-2 font-medium">Nome</th>
+              <th className="px-4 py-2 text-right font-medium">Tamanho da sub-árvore</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      <p>
+          </thead>
+          <tbody>
+            {linhas.map((l) => (
+              <tr key={l.pessoa_id} className="border-t border-outline-variant">
+                <td className="px-4 py-2">{l.nome}</td>
+                <td className="px-4 py-2 text-right text-data-mono tabular-nums">
+                  {l.subarvore_count}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-body-md text-on-surface-variant">
         Soma dos ramos: {soma_ramos} · Total real da campanha: {total_real}
         {soma_ramos !== total_real && (
           <> · {soma_ramos - total_real} apoiador(es) compartilhado(s) entre ramos.</>
