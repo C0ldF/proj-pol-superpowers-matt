@@ -14,8 +14,9 @@ boa parte do scaffold original do `create-next-app` (título ainda
 testes e autenticação implementados por cima dele.
 
 Esta é a primeira fatia de uma série de rollout visual. Ela entrega uma
-**fundação inicial** (tokens + 2 componentes reutilizáveis — `Button` e
-`Input`, nada além disso) e aplica numa **tela real** (`/login`) como
+**fundação inicial** (tokens + 2 componentes reutilizáveis —
+exclusivamente `Button` e `Input`) e aplica numa **tela real**
+(`/login`) como
 prova da arquitetura proposta, evitando introduzir infraestrutura
 desacoplada de um caso real de uso. As próximas 3 fatias (auth restante,
 dashboard+mapa de calor, painel superadmin) ficam fora de escopo, cada
@@ -24,7 +25,7 @@ uma com seu próprio spec/plano quando chegar a vez.
 ## Origem da paleta
 
 Paleta gerada no Google Stitch (fornecida pelo usuário), revisada e
-ajustada nesta sessão:
+ajustada durante o processo de definição do Design System:
 - Tokens M3 (Material) completos — cores, tipografia (Inter), radius,
   spacing — aprovados como estão, com a ressalva de que a prosa da
   entrega do Stitch continha hexadecimais inconsistentes com o YAML de
@@ -35,9 +36,9 @@ ajustada nesta sessão:
   não vieram do Stitch (só os nomes das famílias de cor) — foram geradas
   durante o processo de design utilizando a skill `dataviz` (OKLCH,
   gamut-clamped, mesma curva de L/C da rampa de referência da skill) e
-  validadas por script (`validate_palette.js`, parte da skill `dataviz`
-  — não é um arquivo deste repositório): monotonicidade de luminosidade
-  confirmada nas 3;
+  validadas por ferramenta auxiliar (`validate_palette.js`), utilizada
+  durante a geração da paleta e que não faz parte deste repositório:
+  monotonicidade de luminosidade confirmada nas 3;
   as 3 âncoras (step 450) juntas passam CVD target (ΔE 15.7, acima do
   alvo 12) e contraste ≥3:1 quando aparecem lado a lado (ex.: seletor de
   camada do mapa de calor); legendas discretas de 4 ticks validadas
@@ -60,8 +61,8 @@ ajustada nesta sessão:
    Pro). Arquivo criado: "Sistema Campanha — Design System"
    (`fileKey=nrru1S5LuYK0kBxKB0vsAp`,
    https://www.figma.com/design/nrru1S5LuYK0kBxKB0vsAp). Contém:
-   - **Coleção de variáveis "Color"**: 86 variáveis — 45 tokens M3 do
-     Stitch (semânticos: `primary`, `on-primary`, `surface-container-*`,
+   - **Coleção de variáveis "Color"**: 86 variáveis — 45 tokens de cor
+     M3 do Stitch (semânticos: `primary`, `on-primary`, `surface-container-*`,
      etc.) + 3 rampas de heatmap × 13 steps (`heatmap-forca/100..700`,
      `heatmap-potencial/100..700`, `heatmap-penetracao/100..700`).
    - **7 text styles**: `display-lg`, `headline-lg`, `headline-md`,
@@ -93,12 +94,11 @@ ajustada nesta sessão:
 ## Arquitetura da implementação (código)
 
 **Tailwind v4** — verificar a documentação da versão do Next.js
-utilizada pelo projeto antes da instalação (`web/node_modules/next/dist/docs/`),
-conforme orientação do `web/AGENTS.md`, para confirmar que
-`@tailwindcss/postcss` continua sendo a integração recomendada no
-momento da implementação. Tokens do Figma viram:
-- `web/app/globals.css`: `@theme` block (Tailwind v4 CSS-first) com as
-  45 cores M3 + as 3 rampas (13 steps cada) como custom properties
+utilizada pelo projeto, conforme orientação do `web/AGENTS.md`, para
+confirmar que `@tailwindcss/postcss` continua sendo a integração
+recomendada no momento da implementação. Tokens do Figma viram:
+- `web/app/globals.css`: `@theme` block (Tailwind v4 CSS-first) com os
+  45 tokens de cor M3 + as 3 rampas (13 steps cada) como custom properties
   `--color-*`, mapeadas 1:1 pros nomes das variáveis do Figma
   (`--color-primary`, `--color-heatmap-forca-450`, etc.) — nomenclatura
   kebab-case idêntica ao Figma pra rastreabilidade.
@@ -106,10 +106,11 @@ momento da implementação. Tokens do Figma viram:
   atual do `layout.tsx`), pesos 400/500/600/700 (os usados nos 7 text
   styles).
 
-**Componentes** (`web/app/components/` — convenção já existente no
-projeto, é onde `NavShell.tsx` mora hoje). Não há intenção de
-transformar estes componentes em biblioteca genérica nesta fatia — só
-o que `/login` usa hoje:
+**Componentes** (`web/app/components/` — mantém-se a convenção já
+adotada pelo projeto, é onde `NavShell.tsx` mora hoje; esta fatia não
+introduz nova estrutura para componentes compartilhados, ex.:
+`components/ui/`). Não há intenção de transformar estes componentes em
+biblioteca genérica nesta fatia — só o que `/login` usa hoje:
 - `Button.tsx` — variante única `primary` por enquanto (é só o que o
   login usa); `type`, `disabled`, `children` via props, sem
   `class-variance-authority` ou lib de variantes — YAGNI, só 1 variante
@@ -120,9 +121,9 @@ o que `/login` usa hoje:
   (spread); mesmo raciocínio, sem abstração além do que o login usa
   hoje (texto e senha). Estados: `default`, `hover`, `focus`,
   `disabled`. Estado `error` (borda `error`) faz parte da API do
-  componente por completude, mas `/login` não o exercita hoje — o erro
-  de login é uma mensagem genérica abaixo do form (`role="alert"`), não
-  validação por campo.
+  componente para permitir reutilização futura, mas `/login` não o
+  exercita hoje — o erro de login é uma mensagem genérica abaixo do
+  form (`role="alert"`), não validação por campo.
 
 **Tela `/login`** (`web/app/login/page.tsx` — substitui apenas a camada
 de apresentação; lógica de `entrar()`/estado **não muda**): estrutura
@@ -132,9 +133,9 @@ estilizado com `error`/`on-error-container` tokens.
 **Acessibilidade:** foco sempre visível (`:focus-visible`, nunca
 removido via `outline: none` sem substituto), ordem de tabulação segue
 a ordem visual (identificador → senha → botão), contraste mínimo WCAG
-AA em todo texto — já verificado nos tokens usados (ver seção "Origem
-da paleta" e os cálculos de contraste feitos durante a revisão da
-paleta nesta sessão).
+2.2 AA em todo texto — já verificado nos tokens usados (ver seção
+"Origem da paleta" e os cálculos de contraste realizados durante a
+definição da paleta).
 
 ## Testes
 
@@ -146,8 +147,8 @@ paleta nesta sessão).
   `Button` renderiza `<button>` de verdade).
 - Sem teste novo de snapshot visual — verificação visual real via
   Playwright (servidor de dev), mesmo padrão já usado no S4/S5 do
-  projeto: abrir `/login` no browser, screenshot, comparar com o mockup
-  aprovado no Figma.
+  projeto: abrir `/login` no browser, captura de tela, comparar com o
+  mockup aprovado no Figma.
 - **Responsividade** (decisão desta fatia, não faz parte do mockup
   aprovado no Figma — o mockup é desktop-only, 1440px): em telas
   menores que `md`, o layout passa para `flex-col` — o painel
