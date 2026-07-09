@@ -17,3 +17,12 @@ export function corPorValor(
   const step = STEPS[indiceStep(valor, min, max)];
   return `var(--color-heatmap-${camada}-${step})`;
 }
+
+export function limitesValores(
+  areas: { forca: number; potencial: number; penetracao: number | null }[],
+  camada: 'forca' | 'potencial' | 'penetracao',
+): { min: number; max: number } | null {
+  const valores = areas.map((a) => a[camada]).filter((v): v is number => v !== null);
+  if (valores.length === 0) return null;
+  return { min: Math.min(...valores), max: Math.max(...valores) };
+}
