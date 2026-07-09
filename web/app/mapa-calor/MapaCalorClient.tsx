@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { NavShell } from '../components/NavShell';
-import { corPorValor, limitesValores } from '../../lib/mapa-calor/cor-por-valor';
+import { Message } from '../components/Message';
+import { STEPS, corPorValor, limitesValores } from '../../lib/mapa-calor/cor-por-valor';
 
 type Granularidade = 'zona' | 'bairro';
 type Camada = 'forca' | 'potencial' | 'penetracao';
@@ -16,6 +17,21 @@ type AreaCalor = {
   penetracao: number | null;
   ponto_geojson: { type: 'Point'; coordinates: [number, number] } | null;
 };
+
+function Legenda({ min, max, camada }: { min: number; max: number; camada: Camada }) {
+  const gradiente = `linear-gradient(to right, ${STEPS.map(
+    (step) => `var(--color-heatmap-${camada}-${step})`,
+  ).join(', ')})`;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="h-3 w-full rounded" style={{ background: gradiente }} />
+      <div className="flex justify-between text-body-md text-on-surface-variant">
+        <span>{min}</span>
+        <span>{max}</span>
+      </div>
+    </div>
+  );
+}
 
 export function MapaCalorClient() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -117,27 +133,39 @@ export function MapaCalorClient() {
 
   return (
     <NavShell>
-      <div>
-        <label>
-          Granularidade:
-          <select
-            value={granularidade}
-            onChange={(e) => setGranularidade(e.target.value as Granularidade)}
-          >
-            <option value="zona">Zona</option>
-            <option value="bairro">Bairro</option>
-          </select>
-        </label>
-        <label>
-          Camada:
-          <select value={camada} onChange={(e) => setCamada(e.target.value as Camada)}>
-            <option value="forca">Força</option>
-            <option value="potencial">Potencial</option>
-            <option value="penetracao">Penetração</option>
-          </select>
-        </label>
-        {erro && <p role="alert">{erro}</p>}
-        <div ref={mapContainerRef} style={{ width: '100%', height: '600px' }} />
+      <div className="flex flex-col gap-6">
+        <div className="flex gap-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-label-md text-on-surface-variant">Granularidade:</span>
+            <select
+              value={granularidade}
+              onChange={(e) => setGranularidade(e.target.value as Granularidade)}
+              className="rounded border border-outline bg-surface-container-lowest px-4 py-3 text-body-lg text-on-surface hover:border-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            >
+              <option value="zona">Zona</option>
+              <option value="bairro">Bairro</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-label-md text-on-surface-variant">Camada:</span>
+            <select
+              value={camada}
+              onChange={(e) => setCamada(e.target.value as Camada)}
+              className="rounded border border-outline bg-surface-container-lowest px-4 py-3 text-body-lg text-on-surface hover:border-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            >
+              <option value="forca">Força</option>
+              <option value="potencial">Potencial</option>
+              <option value="penetracao">Penetração</option>
+            </select>
+          </label>
+        </div>
+        {limites && (
+          <Legenda min={limites.min} max={limites.max} camada={camada} />
+        )}
+        {erro && <Message variant="error">{erro}</Message>}
+        <div className="rounded border border-outline-variant overflow-hidden">
+          <div ref={mapContainerRef} style={{ width: '100%', height: '600px' }} />
+        </div>
       </div>
     </NavShell>
   );
