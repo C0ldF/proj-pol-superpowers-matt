@@ -1,0 +1,8 @@
+export const STEPS = [100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700] as const;
+
+export function indiceStep(valor: number, min: number, max: number): number {
+  if (min === max) return 6; // step 400 — centro exato dos 13 steps (índice 6 de 0-12)
+  const proporcao = (valor - min) / (max - min);
+  const indice = Math.round(proporcao * (STEPS.length - 1));
+  return Math.max(0, Math.min(STEPS.length - 1, indice)); // clamp defensivo p/ valor fora de [min, max]
+}
