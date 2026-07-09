@@ -9,6 +9,8 @@ import { CARGOS, ABRANGENCIAS, type Cargo, type Abrangencia } from '../../../lib
 const focoVisivel =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary';
 
+const selectClassName = `rounded border border-outline bg-surface-container-lowest px-4 py-3 text-body-lg text-on-surface hover:border-on-surface-variant ${focoVisivel}`;
+
 type StatusCampanha = 'ativa' | 'suspensa' | 'encerrada';
 
 type Campanha = {
@@ -171,42 +173,77 @@ export function DashboardSuperadminClient() {
         </button>
       </header>
       <main className="flex flex-col gap-6 p-6">
-      <form onSubmit={criarCampanha}>
-        <input value={subdominio} onChange={(e) => setSubdominio(e.target.value)} placeholder="Subdomínio" />
-        <input value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nome" />
-        <select aria-label="cargo" value={cargo} onChange={(e) => setCargo(e.target.value as Cargo)}>
-          {CARGOS.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-        <select
-          aria-label="abrangência"
-          value={abrangencia}
-          onChange={(e) => setAbrangencia(e.target.value as Abrangencia)}
-        >
-          {ABRANGENCIAS.map((a) => (
-            <option key={a} value={a}>{a}</option>
-          ))}
-        </select>
-        {abrangencia === 'municipal' ? (
-          <input
-            type="number"
-            value={municipioId}
-            onChange={(e) => setMunicipioId(e.target.value)}
-            placeholder="Código IBGE do município"
+      <div className="rounded border border-outline-variant bg-surface-container-lowest p-6">
+        <h2 className="mb-4 text-headline-md text-on-surface">Cadastrar nova campanha</h2>
+        <form onSubmit={criarCampanha} className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Input
+            label="Subdomínio"
+            value={subdominio}
+            onChange={(e) => setSubdominio(e.target.value)}
+            placeholder="Subdomínio"
           />
-        ) : (
-          <input value={uf} onChange={(e) => setUf(e.target.value)} placeholder="UF" maxLength={2} />
-        )}
-        <input
-          type="date"
-          value={dataEleicao}
-          onChange={(e) => setDataEleicao(e.target.value)}
-          placeholder="Data da eleição"
-        />
-        <button type="submit">Nova campanha</button>
-        {erroCriar && <p role="alert">{erroCriar}</p>}
-      </form>
+          <Input
+            label="Nome"
+            value={nome}
+            onChange={(e) => setNome(e.target.value)}
+            placeholder="Nome"
+          />
+          <label className="flex flex-col gap-1">
+            <span className="text-label-md text-on-surface-variant">Cargo</span>
+            <select
+              aria-label="cargo"
+              value={cargo}
+              onChange={(e) => setCargo(e.target.value as Cargo)}
+              className={selectClassName}
+            >
+              {CARGOS.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-label-md text-on-surface-variant">Abrangência</span>
+            <select
+              aria-label="abrangência"
+              value={abrangencia}
+              onChange={(e) => setAbrangencia(e.target.value as Abrangencia)}
+              className={selectClassName}
+            >
+              {ABRANGENCIAS.map((a) => (
+                <option key={a} value={a}>{a}</option>
+              ))}
+            </select>
+          </label>
+          {abrangencia === 'municipal' ? (
+            <Input
+              label="Código IBGE do município"
+              type="number"
+              value={municipioId}
+              onChange={(e) => setMunicipioId(e.target.value)}
+              placeholder="Código IBGE do município"
+            />
+          ) : (
+            <Input
+              label="UF"
+              value={uf}
+              onChange={(e) => setUf(e.target.value)}
+              placeholder="UF"
+              maxLength={2}
+            />
+          )}
+          <Input
+            label="Data da eleição"
+            type="date"
+            value={dataEleicao}
+            onChange={(e) => setDataEleicao(e.target.value)}
+            placeholder="Data da eleição"
+          />
+          <Button type="submit" className="md:col-span-2">
+            Nova campanha
+          </Button>
+          {erroCriar && <Message variant="error">{erroCriar}</Message>}
+        </form>
+      </div>
 
       <table>
         <thead>
