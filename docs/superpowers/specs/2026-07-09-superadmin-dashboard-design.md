@@ -48,12 +48,13 @@ estabelece.
    `<div className="flex min-h-screen flex-col">` → barra de topo →
    `<main className="flex flex-col gap-6 p-6">` com as 2 seções
    (form + tabela).
-2. **Barra de topo local** (função não-exportada no mesmo arquivo, igual
-   ao padrão `Legenda`/`IconArea` das fatias C2/C1):
+2. **Barra de topo local, escrita diretamente no `return`** (sem
+   componente nem função separada — diferente da `Legenda`/`IconArea`
+   das fatias C2/C1, que tinham lógica própria; aqui é só marcação):
    `bg-surface-container-low border-b border-outline-variant px-6 py-4`,
    `flex items-center justify-between`. Wordmark "Painel Superadmin"
-   (`text-headline-md text-on-surface`, mesmo tratamento do wordmark
-   "Sistema Campanha" do `NavShell`) à esquerda. Botão "Sair" à
+   (`text-headline-md text-on-surface`, mesmo tratamento tipográfico do
+   wordmark "Sistema Campanha" do `NavShell`) à esquerda. Botão "Sair" à
    direita — **não** usa o componente `Button` (que é estilizado pra
    CTA, `bg-primary`, deslocado numa barra de topo); usa o mesmo botão
    texto puro já existente no `NavShell` (`rounded px-4 py-2 text-body-md
@@ -71,7 +72,9 @@ estabelece.
    `Nome`, `Código IBGE do município`/`UF`, `Data da eleição`) viram
    `Input` — mantém o `placeholder` exato de cada um (testes usam
    `getByPlaceholderText`), `label` novo (texto igual ao placeholder,
-   já que não existia rótulo nenhum antes). `cargo`/`abrangencia`
+   já que não existia rótulo nenhum antes), preservando exatamente a
+   renderização condicional existente (`município` vs. `UF` conforme
+   `abrangencia`). `cargo`/`abrangencia`
    viram `<select>` com as mesmas classes tokenizadas da fatia C2
    (`rounded border border-outline bg-surface-container-lowest px-4
    py-3 text-body-lg text-on-surface hover:border-on-surface-variant`
@@ -85,7 +88,9 @@ estabelece.
 
 ### Tabela de campanhas
 
-4. **Mesmo padrão visual da `RankingTable`** (fatia C1): card
+4. **Replica apenas o tratamento visual da `RankingTable`** (fatia
+   C1) — não compartilha componente nem estrutura interna, só as
+   mesmas classes: card
    (`rounded border border-outline-variant overflow-hidden`) com
    `<h2 className="text-headline-md text-on-surface">Campanhas</h2>`
    fora do card (mesmo posicionamento da `RankingTable`),
@@ -94,22 +99,26 @@ estabelece.
    via `text-center`), `tr` com `border-t border-outline-variant`,
    `td` com `px-4 py-2`. Checkbox de módulo ganha `accent-primary`
    (token de cor nativo do navegador via `accent-color`, sem
-   reinventar componente de checkbox — YAGNI, 1 único lugar no
-   projeto que usa checkbox).
+   reinventar componente de checkbox — YAGNI, único uso atual de
+   checkbox no projeto).
 5. **Botões de status** (`Suspender`/`Reativar`/`Encerrar`) usam
    `Button` com `className` reduzindo padding/tamanho (`px-3 py-1.5`
    em vez do `px-6 py-3` padrão) pra caber numa célula de tabela —
    mesma família visual/foco/disabled do `Button`, só mais compacto.
-   **Risco técnico conhecido e aceito:** classes conflitantes do
-   Tailwind (`px-6`/`px-3` no mesmo elemento) não necessariamente
-   resolvem pela ordem em que aparecem no `className` — a fatia inclui
-   verificação visual real pra confirmar que o override de fato
-   aplica; se não aplicar, o fallback é mover o botão de status pra um
-   `<button>` nativo com classes escritas do zero (sem herdar de
-   `Button`), decisão a tomar na hora se a verificação falhar.
+   **Regra determinística caso o override não funcione:** classes
+   conflitantes do Tailwind (`px-6`/`px-3` no mesmo elemento) não
+   necessariamente resolvem pela ordem em que aparecem no `className`
+   — a fatia inclui verificação visual real que confirma se o padding
+   menor de fato aplica. Caso a sobrescrita não funcione, a
+   implementação deve abandonar o componente `Button` apenas para os
+   botões de status e usar um `<button>` nativo estilizado do zero com
+   os mesmos tokens de cor, foco e estados do `Button` — não é decisão
+   do implementador, é o comportamento exigido se a verificação falhar.
 6. **Erro de lista/status/módulo** (`erro`) vira `<Message
    variant="error">{erro}</Message>` no mesmo lugar em que já aparece
-   hoje (`if (erro) return ...` antes da tabela).
+   hoje (`if (erro) return ...` antes da tabela), preservando
+   exatamente a lógica de exibição existente (só troca o elemento, não
+   quando/porque o erro aparece).
 
 ## Arquitetura
 
@@ -117,12 +126,10 @@ Toda a mudança é dentro de `web/app/superadmin/dashboard/DashboardSuperadminCl
 — nenhum componente novo compartilhado, nenhuma mudança de contrato de
 API/fetch/estado. `web/app/superadmin/dashboard/page.tsx` não muda.
 
-- Barra de topo: bloco de JSX local no início do `return`, sem função
-  separada (é pequena o bastante — diferente da `Legenda` do C2, que
-  tinha lógica própria de gradiente, aqui é só marcação).
-- Ordem de leitura do arquivo: imports (`Input`/`Button`/`Message`
-  novos) → tipos/constantes (intocados) → componente → barra de topo →
-  card do form → card da tabela.
+- Imports (`Input`/`Button`/`Message` novos) → tipos/constantes
+  (intocados) → componente. O JSX dentro do `return` permanece linear
+  (não vira sub-componentes nem funções separadas): barra de topo,
+  card do formulário, card da tabela, nessa ordem.
 
 ## Testes
 
@@ -160,3 +167,7 @@ API/fetch/estado. `web/app/superadmin/dashboard/page.tsx` não muda.
 - Mudar `/superadmin/login` — já restilizado, intocado.
 - Paginação/busca/filtro na tabela de campanhas — fora de escopo,
   nunca foi pedido, número de campanhas ainda é pequeno.
+- Alterar a estrutura semântica usada pelos testes existentes
+  (`placeholder`s, textos dos botões, `aria-label` dos checkboxes,
+  mensagens de erro) — preservação integral da suíte atual é
+  requisito, não consequência incidental.
