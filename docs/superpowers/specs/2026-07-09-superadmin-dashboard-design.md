@@ -7,7 +7,7 @@
 Última tela autenticada do produto sem design system — fecha o rollout
 visual (fundação → fatia B → fatia C1 `/dashboard` → fatia C2
 `/mapa-calor` → esta fatia). `/superadmin/login` já foi restilizado no
-S7/fatia B (split-screen `bg-primary` + wordmark "Painel Superadmin",
+S7/fatia B (split-screen `bg-primary` + título da aplicação "Painel Superadmin",
 `Input`/`Button`/`Message`) e não é tocado aqui além do padrão que
 estabelece.
 
@@ -45,18 +45,18 @@ estabelece.
    Dashboard) não faz sentido pro superadmin, que é uma identidade
    separada (mesma decisão já tomada no S7 pro resto do namespace
    `/superadmin/*`). Estrutura vira local nesta página:
-   `<div className="flex min-h-screen flex-col">` → barra de topo →
+   `<div className="flex min-h-screen flex-col">` → barra superior →
    `<main className="flex flex-col gap-6 p-6">` com as 2 seções
    (form + tabela).
-2. **Barra de topo local, escrita diretamente no `return`** (sem
+2. **Barra superior local, escrita diretamente no `return`** (sem
    componente nem função separada — diferente da `Legenda`/`IconArea`
    das fatias C2/C1, que tinham lógica própria; aqui é só marcação):
    `bg-surface-container-low border-b border-outline-variant px-6 py-4`,
-   `flex items-center justify-between`. Wordmark "Painel Superadmin"
+   `flex items-center justify-between`. Título da aplicação "Painel Superadmin"
    (`text-headline-md text-on-surface`, mesmo tratamento tipográfico do
-   wordmark "Sistema Campanha" do `NavShell`) à esquerda. Botão "Sair" à
+   título da aplicação "Sistema Campanha" do `NavShell`) à esquerda. Botão "Sair" à
    direita — **não** usa o componente `Button` (que é estilizado pra
-   CTA, `bg-primary`, deslocado numa barra de topo); usa o mesmo botão
+   CTA, `bg-primary`, deslocado numa barra superior); usa o mesmo botão
    texto puro já existente no `NavShell` (`rounded px-4 py-2 text-body-md
    text-on-surface-variant hover:text-on-surface` + cadeia
    `focus-visible`), copiado inline (não extraído pro `NavShell` — são
@@ -102,18 +102,24 @@ estabelece.
    reinventar componente de checkbox — YAGNI, único uso atual de
    checkbox no projeto).
 5. **Botões de status** (`Suspender`/`Reativar`/`Encerrar`) usam
-   `Button` com `className` reduzindo padding/tamanho (`px-3 py-1.5`
-   em vez do `px-6 py-3` padrão) pra caber numa célula de tabela —
-   mesma família visual/foco/disabled do `Button`, só mais compacto.
-   **Regra determinística caso o override não funcione:** classes
+   `<button>` nativo desde o início — **não** o componente `Button`
+   compartilhado. `Button` fixa `px-6 py-3` (pensado pra CTA de
+   formulário), grande demais numa célula de tabela; classes
    conflitantes do Tailwind (`px-6`/`px-3` no mesmo elemento) não
-   necessariamente resolvem pela ordem em que aparecem no `className`
-   — a fatia inclui verificação visual real que confirma se o padding
-   menor de fato aplica. Caso a sobrescrita não funcione, a
-   implementação deve abandonar o componente `Button` apenas para os
-   botões de status e usar um `<button>` nativo estilizado do zero com
-   os mesmos tokens de cor, foco e estados do `Button` — não é decisão
-   do implementador, é o comportamento exigido se a verificação falhar.
+   necessariamente resolvem pela ordem em que aparecem no `className`,
+   então sobrescrever o padding do `Button` via `className` não é
+   confiável. Única implementação válida (sem verificação em runtime
+   nem fallback condicional): `<button>` nativo com os mesmos tokens
+   de cor, foco e estados do `Button` (`bg-primary`/`text-on-primary`/
+   cadeia `focus-visible`/`disabled`), só com `px-3 py-1.5` no lugar de
+   `px-6 py-3` — decisão própria da tabela, não uma cópia a manter
+   sincronizada com `Button.tsx` (mesmo padrão de `RankingTable`/
+   `AlertasList`, que também escrevem suas próprias classes Tailwind
+   em vez de importar string de className entre arquivos). Modificar
+   `Button.tsx` pra aceitar um tamanho menor foi cogitado e descartado:
+   expandiria o escopo desta fatia (que toca só
+   `DashboardSuperadminClient.tsx`) pra um componente usado em 4+ telas,
+   por causa de padding de 1 tabela.
 6. **Erro de lista/status/módulo** (`erro`) vira `<Message
    variant="error">{erro}</Message>` no mesmo lugar em que já aparece
    hoje (`if (erro) return ...` antes da tabela), preservando
@@ -128,7 +134,7 @@ API/fetch/estado. `web/app/superadmin/dashboard/page.tsx` não muda.
 
 - Imports (`Input`/`Button`/`Message` novos) → tipos/constantes
   (intocados) → componente. O JSX dentro do `return` permanece linear
-  (não vira sub-componentes nem funções separadas): barra de topo,
+  (não vira sub-componentes nem funções separadas): barra superior,
   card do formulário, card da tabela, nessa ordem.
 
 ## Testes
@@ -141,10 +147,11 @@ API/fetch/estado. `web/app/superadmin/dashboard/page.tsx` não muda.
   via os testes de comportamento já existentes + verificação visual).
 - Verificação visual real via Playwright (mesmo padrão das fatias
   anteriores) contra o servidor de dev, com sessão de superadmin real:
-  barra de topo com wordmark + Sair, form em card com grid 2 colunas
-  no desktop / 1 no mobile, tabela com checkbox tokenizado e botões de
-  status **realmente menores** que o `Button` padrão (o risco do item
-  5 acima), os 2 banners de erro via `Message`, sem scroll horizontal
+  barra superior com título da aplicação + Sair, form em card com grid
+  2 colunas no desktop / 1 no mobile, tabela com checkbox tokenizado e
+  botões de status visivelmente menores que um `Button` padrão de CTA
+  (decisão determinística do item 5 acima, `<button>` nativo desde o
+  início), os 2 banners de erro via `Message`, sem scroll horizontal
   de página em mobile (só a tabela deve scrollar horizontalmente via
   seu próprio `overflow-x-auto`, nunca a página).
 
@@ -159,7 +166,7 @@ API/fetch/estado. `web/app/superadmin/dashboard/page.tsx` não muda.
   propósito.
 - Componente `Select` reutilizável — mesma disciplina YAGNI já
   estabelecida (`Button`/`Input`/`Message`/decisão equivalente na C2).
-- Extrair a barra de topo pra um componente compartilhado tipo
+- Extrair a barra superior pra um componente compartilhado tipo
   `NavShell` — só 1 uso, e os 2 sistemas de navegação (campanha vs.
   superadmin) são intencionalmente desacoplados.
 - Mudar qualquer lógica de fetch/estado/validação do form ou da
