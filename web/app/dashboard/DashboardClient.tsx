@@ -7,9 +7,11 @@ import { RankingTable } from './RankingTable';
 export function DashboardClient() {
   return (
     <NavShell>
-      <AlertasList />
-      <EvolucaoChart />
-      <RankingTable />
+      <div className="flex flex-col gap-6">
+        <AlertasList />
+        <EvolucaoChart />
+        <RankingTable />
+      </div>
     </NavShell>
   );
 }
