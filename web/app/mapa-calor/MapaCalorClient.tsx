@@ -1,8 +1,9 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { NavShell } from '../components/NavShell';
+import { corPorValor, limitesValores } from '../../lib/mapa-calor/cor-por-valor';
 
 type Granularidade = 'zona' | 'bairro';
 type Camada = 'forca' | 'potencial' | 'penetracao';
@@ -16,12 +17,6 @@ type AreaCalor = {
   ponto_geojson: { type: 'Point'; coordinates: [number, number] } | null;
 };
 
-const CORES: Record<Camada, string> = {
-  forca: '#2563eb',
-  potencial: '#16a34a',
-  penetracao: '#dc2626',
-};
-
 export function MapaCalorClient() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -29,6 +24,7 @@ export function MapaCalorClient() {
   const [camada, setCamada] = useState<Camada>('forca');
   const [areas, setAreas] = useState<AreaCalor[]>([]);
   const [erro, setErro] = useState<string | null>(null);
+  const limites = useMemo(() => limitesValores(areas, camada), [areas, camada]);
 
   useEffect(() => {
     let cancelado = false;
@@ -89,8 +85,9 @@ export function MapaCalorClient() {
       el.style.width = '16px';
       el.style.height = '16px';
       el.style.borderRadius = '50%';
-      el.style.background = CORES[camada];
-      el.style.opacity = valor === null ? '0.2' : '1';
+      el.style.background = limites
+        ? corPorValor(valor, limites.min, limites.max, camada)
+        : 'var(--color-on-surface-variant)';
 
       const content = document.createElement('div');
       const nome = document.createElement('strong');
@@ -116,7 +113,7 @@ export function MapaCalorClient() {
     return () => {
       for (const m of markers) m.remove();
     };
-  }, [areas, camada]);
+  }, [areas, camada, limites]);
 
   return (
     <NavShell>
