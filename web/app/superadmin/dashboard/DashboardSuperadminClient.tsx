@@ -1,7 +1,13 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { Input } from '../../components/Input';
+import { Button } from '../../components/Button';
+import { Message } from '../../components/Message';
 import { MODULOS, type Modulo } from '../../../lib/modulos';
 import { CARGOS, ABRANGENCIAS, type Cargo, type Abrangencia } from '../../../lib/campanha/constantes';
+
+const focoVisivel =
+  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary';
 
 type StatusCampanha = 'ativa' | 'suspensa' | 'encerrada';
 
@@ -153,9 +159,18 @@ export function DashboardSuperadminClient() {
   if (!campanhas) return null;
 
   return (
-    <div>
-      <button onClick={sair}>Sair</button>
-
+    <div className="flex min-h-screen flex-col">
+      <header className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low px-6 py-4">
+        <p className="text-headline-md text-on-surface">Painel Superadmin</p>
+        <button
+          type="button"
+          onClick={sair}
+          className={`rounded px-4 py-2 text-body-md text-on-surface-variant transition-colors hover:text-on-surface ${focoVisivel}`}
+        >
+          Sair
+        </button>
+      </header>
+      <main className="flex flex-col gap-6 p-6">
       <form onSubmit={criarCampanha}>
         <input value={subdominio} onChange={(e) => setSubdominio(e.target.value)} placeholder="Subdomínio" />
         <input value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nome" />
@@ -241,6 +256,7 @@ export function DashboardSuperadminClient() {
           ))}
         </tbody>
       </table>
+      </main>
     </div>
   );
 }
