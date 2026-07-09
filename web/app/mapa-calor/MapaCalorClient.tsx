@@ -107,16 +107,18 @@ export function MapaCalorClient() {
 
       const content = document.createElement('div');
       const nome = document.createElement('strong');
+      nome.className = 'font-medium text-body-lg text-on-surface';
       nome.textContent = area.area_nome;
-      content.append(
-        nome,
-        document.createElement('br'),
+      const valores = document.createElement('div');
+      valores.className = 'text-body-md text-on-surface-variant';
+      valores.append(
         `Força: ${area.forca}`,
         document.createElement('br'),
         `Potencial: ${area.potencial}`,
         document.createElement('br'),
         `Penetração: ${area.penetracao ?? 'sem dado'}`,
       );
+      content.append(nome, valores);
       const popup = new maplibregl.Popup({ offset: 12 }).setDOMContent(content);
 
       markers.push(
