@@ -1,8 +1,10 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { NavShell } from '../components/NavShell';
+import { Message } from '../components/Message';
+import { STEPS, corPorValor, limitesValores } from '../../lib/mapa-calor/cor-por-valor';
 
 type Granularidade = 'zona' | 'bairro';
 type Camada = 'forca' | 'potencial' | 'penetracao';
@@ -16,11 +18,20 @@ type AreaCalor = {
   ponto_geojson: { type: 'Point'; coordinates: [number, number] } | null;
 };
 
-const CORES: Record<Camada, string> = {
-  forca: '#2563eb',
-  potencial: '#16a34a',
-  penetracao: '#dc2626',
-};
+function Legenda({ min, max, camada }: { min: number; max: number; camada: Camada }) {
+  const gradiente = `linear-gradient(to right, ${STEPS.map(
+    (step) => `var(--color-heatmap-${camada}-${step})`,
+  ).join(', ')})`;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="h-3 w-full rounded" style={{ background: gradiente }} />
+      <div className="flex justify-between text-body-md text-on-surface-variant">
+        <span>{min}</span>
+        <span>{max}</span>
+      </div>
+    </div>
+  );
+}
 
 export function MapaCalorClient() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -29,6 +40,7 @@ export function MapaCalorClient() {
   const [camada, setCamada] = useState<Camada>('forca');
   const [areas, setAreas] = useState<AreaCalor[]>([]);
   const [erro, setErro] = useState<string | null>(null);
+  const limites = useMemo(() => limitesValores(areas, camada), [areas, camada]);
 
   useEffect(() => {
     let cancelado = false;
@@ -89,21 +101,24 @@ export function MapaCalorClient() {
       el.style.width = '16px';
       el.style.height = '16px';
       el.style.borderRadius = '50%';
-      el.style.background = CORES[camada];
-      el.style.opacity = valor === null ? '0.2' : '1';
+      el.style.background = limites
+        ? corPorValor(valor, limites.min, limites.max, camada)
+        : 'var(--color-on-surface-variant)';
 
       const content = document.createElement('div');
       const nome = document.createElement('strong');
+      nome.className = 'font-medium text-body-lg text-on-surface';
       nome.textContent = area.area_nome;
-      content.append(
-        nome,
-        document.createElement('br'),
+      const valores = document.createElement('div');
+      valores.className = 'text-body-md text-on-surface-variant';
+      valores.append(
         `Força: ${area.forca}`,
         document.createElement('br'),
         `Potencial: ${area.potencial}`,
         document.createElement('br'),
         `Penetração: ${area.penetracao ?? 'sem dado'}`,
       );
+      content.append(nome, valores);
       const popup = new maplibregl.Popup({ offset: 12 }).setDOMContent(content);
 
       markers.push(
@@ -116,31 +131,43 @@ export function MapaCalorClient() {
     return () => {
       for (const m of markers) m.remove();
     };
-  }, [areas, camada]);
+  }, [areas, camada, limites]);
 
   return (
     <NavShell>
-      <div>
-        <label>
-          Granularidade:
-          <select
-            value={granularidade}
-            onChange={(e) => setGranularidade(e.target.value as Granularidade)}
-          >
-            <option value="zona">Zona</option>
-            <option value="bairro">Bairro</option>
-          </select>
-        </label>
-        <label>
-          Camada:
-          <select value={camada} onChange={(e) => setCamada(e.target.value as Camada)}>
-            <option value="forca">Força</option>
-            <option value="potencial">Potencial</option>
-            <option value="penetracao">Penetração</option>
-          </select>
-        </label>
-        {erro && <p role="alert">{erro}</p>}
-        <div ref={mapContainerRef} style={{ width: '100%', height: '600px' }} />
+      <div className="flex flex-col gap-6">
+        <div className="flex gap-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-label-md text-on-surface-variant">Granularidade:</span>
+            <select
+              value={granularidade}
+              onChange={(e) => setGranularidade(e.target.value as Granularidade)}
+              className="rounded border border-outline bg-surface-container-lowest px-4 py-3 text-body-lg text-on-surface hover:border-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            >
+              <option value="zona">Zona</option>
+              <option value="bairro">Bairro</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-label-md text-on-surface-variant">Camada:</span>
+            <select
+              value={camada}
+              onChange={(e) => setCamada(e.target.value as Camada)}
+              className="rounded border border-outline bg-surface-container-lowest px-4 py-3 text-body-lg text-on-surface hover:border-on-surface-variant focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            >
+              <option value="forca">Força</option>
+              <option value="potencial">Potencial</option>
+              <option value="penetracao">Penetração</option>
+            </select>
+          </label>
+        </div>
+        {limites && (
+          <Legenda min={limites.min} max={limites.max} camada={camada} />
+        )}
+        {erro && <Message variant="error">{erro}</Message>}
+        <div className="rounded border border-outline-variant overflow-hidden">
+          <div ref={mapContainerRef} style={{ width: '100%', height: '600px' }} />
+        </div>
       </div>
     </NavShell>
   );

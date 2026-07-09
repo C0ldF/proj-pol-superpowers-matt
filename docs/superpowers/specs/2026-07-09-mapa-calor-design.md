@@ -42,6 +42,8 @@ mesmo componente sem mudança).
 
 ## Decisões
 
+### Funcional
+
 1. **Cor do marcador passa a variar por magnitude, usando a rampa de
    13 steps da camada ativa** (era 1 cor fixa por camada). Escala
    **linear min-max dos dados carregados no momento**: pega o menor e
@@ -55,7 +57,10 @@ mesmo componente sem mudança).
    específica pode mudar entre 2 carregamentos diferentes se o
    conjunto de dados mudar — é o comportamento correto pra uma escala
    relativa (dataviz: "sequential = magnitude, um hue, mais escuro =
-   mais").
+   mais"). Caso degenerado (`min === max`, todos os valores iguais) é
+   decisão de negócio, não só de implementação: deve produzir sempre
+   o step central exato (`400`, índice 6 de 0-12), nunca o mais claro
+   nem o mais escuro.
 2. **Valor nulo (`penetracao: null`, "sem dado") vira cinza neutro
    (`--color-on-surface-variant`), fora da rampa colorida** — nunca
    pode ser confundido com "valor baixo" (que seria o step mais claro
@@ -63,19 +68,25 @@ mesmo componente sem mudança).
    reduzida, o que ficava ambíguo justamente por causa da mudança da
    decisão 1 (com cor fixa por camada a ambiguidade não existia do
    mesmo jeito). Popup continua dizendo "sem dado" pro valor de
-   Penetração nesse caso (texto já existente, não muda).
+   Penetração nesse caso (texto já existente, não muda). Valores nulos
+   nunca participam do cálculo de min/max — são filtrados antes.
+
+### Visual
+
 3. **Legenda nova: barra horizontal com gradiente dos 13 steps +
    min/max real dos dados carregados**, entre os controles e o mapa
    (não flutuante sobre o mapa — não deve competir com os
    marcadores/popups por espaço). Web-safe via `linear-gradient` CSS
-   inline usando os 13 tokens da camada ativa como color-stops. Rótulo
-   min à esquerda, max à direita, formatado com o mesmo valor bruto
-   que aparece no popup (sem unidade especial pra Penetração nesta
-   fatia — já é assim no popup hoje, não é regressão introduzida
-   aqui). Se todos os valores da camada ativa forem `null` (edge case:
-   nenhum dado de Penetração ainda), a legenda não renderiza (não faz
-   sentido mostrar gradiente sem extremos) — todos os marcadores ficam
-   cinza nesse caso.
+   inline usando os 13 tokens da camada ativa como color-stops, cada
+   step ocupando largura uniforme na barra (independente da
+   distribuição estatística dos dados — não é um gradiente
+   proporcional à densidade). Rótulo min à esquerda, max à direita,
+   formatado com o mesmo valor bruto que aparece no popup (sem unidade
+   especial pra Penetração nesta fatia — já é assim no popup hoje, não
+   é regressão introduzida aqui). Se todos os valores da camada ativa
+   forem `null` (edge case: nenhum dado de Penetração ainda), a
+   legenda não renderiza (não faz sentido mostrar gradiente sem
+   extremos) — todos os marcadores ficam cinza nesse caso.
 4. **Controles (`<select>` nativos) ganham classes consistentes com o
    `Input`** já existente (`web/app/components/Input.tsx`) — mesma
    borda (`border-outline hover:border-on-surface-variant`), `rounded`,
@@ -89,16 +100,15 @@ mesmo componente sem mudança).
    border-outline-variant`, mesmo tratamento visual dos cards de
    `AlertasList`/`RankingTable` do dashboard) — mantém consistência
    entre as 2 telas autenticadas do produto. Popup ganha tipografia
-   tokenizada: nome da área em `text-title-md`/`text-on-surface`
-   (destaque), os 3 valores (Força/Potencial/Penetração) em
-   `text-body-md`/`text-on-surface-variant`. Continua via
+   tokenizada: nome da área em `font-medium text-body-lg
+   text-on-surface` (destaque — não existe escala `title` nos 7 tokens
+   de tipografia da fundação: `display-lg`/`headline-lg`/`headline-md`/
+   `body-lg`/`body-md`/`label-md`/`data-mono`; `body-lg`+`font-medium`
+   é o destaque correto pro tamanho compacto de um popup, `headline-md`
+   ficaria grande demais), os 3 valores (Força/Potencial/Penetração)
+   em `text-body-md`/`text-on-surface-variant`. Continua via
    `setDOMContent` (nunca `setHTML` — a correção de XSS do S4 não
-   muda). Nome da área usa `font-medium text-body-lg text-on-surface`
-   (não existe escala `title` nos 7 tokens de tipografia da fundação —
-   `display-lg`/`headline-lg`/`headline-md`/`body-lg`/`body-md`/
-   `label-md`/`data-mono` — `body-lg`+`font-medium` é o destaque
-   correto pro tamanho compacto de um popup, `headline-md` ficaria
-   grande demais).
+   muda).
 6. **Erro vira `<Message variant="error">`** — mesmo componente já
    usado em `/login`, `/superadmin/login`, `/redefinir-senha`,
    `AlertasList`, `EvolucaoChart`, `RankingTable`. Produz o mesmo
@@ -108,8 +118,9 @@ mesmo componente sem mudança).
 ## Arquitetura
 
 **Módulo novo `web/lib/mapa-calor/cor-por-valor.ts`** (lógica pura,
-sem React/DOM — testável em isolamento, diferente das 4 tasks da C1
-que eram só apresentação):
+sem dependência de React, DOM, Tailwind ou MapLibre — testável em
+isolamento e reutilizável fora do componente, diferente das 4 tasks
+da C1 que eram só apresentação):
 
 ```ts
 export const STEPS = [100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700] as const;
@@ -117,7 +128,8 @@ export const STEPS = [100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650
 export function indiceStep(valor: number, min: number, max: number): number {
   if (min === max) return 6; // step 400 — centro exato dos 13 steps (índice 6 de 0-12)
   const proporcao = (valor - min) / (max - min);
-  return Math.round(proporcao * 12);
+  const indice = Math.round(proporcao * (STEPS.length - 1));
+  return Math.max(0, Math.min(STEPS.length - 1, indice)); // clamp defensivo p/ valor fora de [min, max]
 }
 
 export function corPorValor(
@@ -131,7 +143,7 @@ export function corPorValor(
   return `var(--color-heatmap-${camada}-${step})`;
 }
 
-export function extentes(
+export function limitesValores(
   areas: { forca: number; potencial: number; penetracao: number | null }[],
   camada: 'forca' | 'potencial' | 'penetracao',
 ): { min: number; max: number } | null {
@@ -141,22 +153,28 @@ export function extentes(
 }
 ```
 
-`indiceStep`/`corPorValor`/`extentes` são as 3 unidades testáveis
-desta fatia — cobertura via TDD antes de integrar no componente.
+`indiceStep`/`corPorValor`/`limitesValores` são as 3 unidades
+testáveis desta fatia — cobertura via TDD antes de integrar no
+componente.
 
 **`MapaCalorClient.tsx`:**
-- Importa `corPorValor`/`extentes` do módulo novo.
+- Importa `corPorValor`/`limitesValores` do módulo novo.
 - `useEffect` que desenha os markers (já existe) passa a calcular
-  `extentes(areas, camada)` 1x por render do efeito (não por marker) e
+  `limitesValores(areas, camada)` 1x por render do efeito (não por
+  marker — decisão arquitetural: as extensões min/max são computadas
+  uma única vez e reutilizadas por todos os marcadores do loop) e
   usar `corPorValor(valor, min, max, camada)` no lugar de
-  `CORES[camada]` — se `extentes` retornar `null` (todos nulos),
-  todo marcador usa `var(--color-on-surface-variant)` direto.
+  `CORES[camada]` — se `limitesValores` retornar `null` (todos
+  nulos), todo marcador usa `var(--color-on-surface-variant)` direto.
   `el.style.opacity` deixa de existir (a distinção sem-dado agora é só
   de cor, não opacidade — a decisão 2 tornou a opacidade redundante).
+  Complexidade se mantém `O(n)` (1 passada pra `limitesValores` + 1
+  passada pro loop de markers), equivalente ao desenho atual dos
+  marcadores — a mudança não introduz custo assintótico novo.
 - Legenda: novo bloco local (função não-exportada dentro do arquivo,
   mesmo padrão dos ícones `IconArea`/`IconLideranca` da C1) que
   recebe `{ min, max, camada }` e renderiza o gradiente CSS + os 2
-  rótulos. Só renderiza se `extentes(...)` não for `null`.
+  rótulos. Só renderiza se `limitesValores(...)` não for `null`.
 - Estrutura de layout: `<NavShell>` → `<div className="flex flex-col
   gap-6">` (mesmo gap-6 introduzido no fix final da C1 pro
   `DashboardClient`) contendo: controles (`flex gap-4`, os 2
@@ -177,8 +195,9 @@ desta fatia — cobertura via TDD antes de integrar no componente.
   `null` → `var(--color-on-surface-variant)` sempre, independente da
   camada; valor no mínimo/máximo de cada camada → o token do step 100/
   700 daquela camada especificamente (não confundir rampas entre
-  camadas). `extentes` — lista vazia ou todos `null` → `null`; mistura
-  de `null` e números → ignora os `null` no cálculo de min/max.
+  camadas). `limitesValores` — lista vazia ou todos `null` → `null`;
+  mistura de `null` e números → ignora os `null` no cálculo de
+  min/max.
 - `web/app/mapa-calor/MapaCalorClient.test.tsx` (4 casos existentes) —
   não modificados, continuam passando sem alteração (nenhum testa cor
   ou estilo, só fetch/estado).
@@ -214,3 +233,6 @@ desta fatia — cobertura via TDD antes de integrar no componente.
 - Zoom/clustering de marcadores, ou qualquer mudança de comportamento
   do MapLibre além de cor — fora de escopo, isso é restilo + 1 feature
   pontual (cor por magnitude), não uma revisão de UX do mapa.
+- Mudar o algoritmo de agregação do backend (`/api/mapa-calor`) — a
+  escala de cor é puramente client-side sobre os dados já retornados,
+  não exige mudança na API.
