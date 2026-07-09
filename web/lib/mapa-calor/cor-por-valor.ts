@@ -6,3 +6,14 @@ export function indiceStep(valor: number, min: number, max: number): number {
   const indice = Math.round(proporcao * (STEPS.length - 1));
   return Math.max(0, Math.min(STEPS.length - 1, indice)); // clamp defensivo p/ valor fora de [min, max]
 }
+
+export function corPorValor(
+  valor: number | null,
+  min: number,
+  max: number,
+  camada: 'forca' | 'potencial' | 'penetracao',
+): string {
+  if (valor === null) return 'var(--color-on-surface-variant)';
+  const step = STEPS[indiceStep(valor, min, max)];
+  return `var(--color-heatmap-${camada}-${step})`;
+}
