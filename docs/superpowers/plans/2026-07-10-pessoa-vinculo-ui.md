@@ -16,9 +16,11 @@
 - Nenhum endpoint novo usa `SECURITY DEFINER` pra ler `pessoa`/`vinculo` — toda leitura passa por `ssrClient` (RLS do usuário), nunca `adminClient`, pra herdar `pessoa_select`/`vinculo_select` automaticamente.
 - `DELETE /api/vinculos/[id]` (já existe, não muda nesta fatia) só realoca a sub-árvore se o body trouxer `destino_id` — toda chamada desta fatia **sempre** envia esse campo (nunca omite).
 - Autocomplete de "Responsável" só mostra Pessoas com vínculo de papel `gestor`, `coordenador` ou `lideranca` — filtro client-side, não imposto pelo backend (débito técnico documentado no spec, não corrigido nesta fatia).
-- Botão "Remover vínculo" fica desabilitado quando `responsavel_acima` vem `null` no `GET .../impacto` (vínculo raiz do Gestor).
-- Busca de pessoa usa `public.normalizar_texto()` (já existe, `lower(trim(unaccent(...)))`) — case-insensitive e acento-insensitive.
+- Botão "Remover vínculo" fica desabilitado quando `responsavel_acima` vem `null` no `GET .../impacto` (vínculo raiz do Gestor) **ou** quando é o único vínculo da Pessoa (`vinculos.length === 1` — remover deixaria a Pessoa sem vínculo nenhum, invisível pra RLS mas não apagada, ver spec decisão 14).
+- Busca de pessoa usa `public.normalizar_texto()` (já existe, `lower(trim(unaccent(...)))`) — case-insensitive e acento-insensitive, **substring sobre `nome` apenas** (spec decisão 3). CPF não é buscável por design (só existe como hash irreversível, `cpf_hmac`); título não é buscável nesta fatia.
+- **Sem paginação em `GET /api/pessoas`** (spec decisão 3) — lista tudo que a RLS libera, `ORDER BY nome ASC`. Débito documentado: vira requisito se o volume passar de algumas centenas de pessoas por campanha.
 - Todas as páginas novas seguem o padrão `redirect('/login')` já usado em `/dashboard`/`/mapa-calor` (não o padrão inline do namespace `/superadmin/*`).
+- **Sem arquivo de tipos compartilhado** (`types/pessoa.ts` ou similar) — mesmo padrão já estabelecido em `DashboardSuperadminClient.tsx`/`MapaCalorClient.tsx`/`RankingTable.tsx`: cada componente define localmente o tipo que casa com a resposta do endpoint que ele consome. Nenhum arquivo de tipos central existe no projeto hoje; introduzir um agora seria mudança de convenção unilateral, fora do escopo desta fatia.
 - Test runner: from `web/`, `npx vitest run <path>` for a single file, `npm test` for the whole suite.
 
 ---
@@ -914,14 +916,36 @@ describe('ResponsavelAutocomplete', () => {
     const onChange = vi.fn();
     render(<ResponsavelAutocomplete label="Responsável" value={null} onChange={onChange} />);
 
-    fireEvent.change(screen.getByLabelText('Responsável'), { target: { value: 'a' } });
+    fireEvent.change(screen.getByLabelText('Responsável'), { target: { value: 'ge' } });
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith('/api/pessoas?q=a');
+      expect(fetch).toHaveBeenCalledWith('/api/pessoas?q=ge');
     });
     expect(await screen.findByText('Geraldo Gestor')).toBeInTheDocument();
     expect(screen.getByText('Lucia Lideranca')).toBeInTheDocument();
     expect(screen.queryByText('Ana Apoiadora')).not.toBeInTheDocument();
+  });
+
+  it('menos de 2 caracteres não dispara busca', async () => {
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ pessoas: mockPessoas }) })) as never;
+    render(<ResponsavelAutocomplete label="Responsável" value={null} onChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText('Responsável'), { target: { value: 'g' } });
+    await new Promise((r) => setTimeout(r, 350));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('limita a 10 resultados no dropdown mesmo se a API devolver mais', async () => {
+    const muitasPessoas = Array.from({ length: 15 }, (_, i) => ({
+      public_id: `pes_${i}`, nome: `Gestor ${i}`,
+      vinculos: [{ id: `v-${i}`, papel: 'gestor', responsavel: null }],
+    }));
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ pessoas: muitasPessoas }) })) as never;
+    render(<ResponsavelAutocomplete label="Responsável" value={null} onChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText('Responsável'), { target: { value: 'ge' } });
+    await screen.findByText('Gestor 0');
+    expect(screen.getAllByRole('button')).toHaveLength(10);
   });
 
   it('clicar num resultado chama onChange e fecha a lista', async () => {
@@ -960,6 +984,8 @@ type PessoaComVinculos = {
 };
 
 const PAPEIS_ELEGIVEIS = new Set(['gestor', 'coordenador', 'lideranca']);
+const MIN_CARACTERES = 2;
+const LIMITE_RESULTADOS = 10;
 
 export function ResponsavelAutocomplete({
   label,
@@ -975,7 +1001,7 @@ export function ResponsavelAutocomplete({
   const [aberto, setAberto] = useState(false);
 
   useEffect(() => {
-    if (!termo || (value && termo === value.nome)) {
+    if (termo.length < MIN_CARACTERES || (value && termo === value.nome)) {
       setResultados([]);
       return;
     }
@@ -986,7 +1012,9 @@ export function ResponsavelAutocomplete({
           const elegiveis = data.pessoas.filter((p) =>
             p.vinculos.some((v) => PAPEIS_ELEGIVEIS.has(v.papel)),
           );
-          setResultados(elegiveis.map((p) => ({ public_id: p.public_id, nome: p.nome })));
+          setResultados(
+            elegiveis.slice(0, LIMITE_RESULTADOS).map((p) => ({ public_id: p.public_id, nome: p.nome })),
+          );
           setAberto(true);
         })
         .catch(() => setResultados([]));
@@ -1037,7 +1065,7 @@ export function ResponsavelAutocomplete({
 - [ ] **Step 4: Rodar teste, ver passar**
 
 Run: `npx vitest run app/pessoas/ResponsavelAutocomplete.test.tsx`
-Expected: PASS (2/2).
+Expected: PASS (4/4).
 
 - [ ] **Step 5: Commit**
 
@@ -1152,6 +1180,13 @@ describe('PessoasListClient', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalled());
     expect(screen.getByText('+ Nova pessoa')).toHaveAttribute('href', '/pessoas/novo');
   });
+
+  it('lista vazia mostra empty state em vez de tabela sem linhas', async () => {
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => ({ pessoas: [] }) })) as never;
+    render(<PessoasListClient />);
+    expect(await screen.findByText('Nenhuma pessoa cadastrada ainda.')).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  });
 });
 ```
 
@@ -1243,7 +1278,11 @@ export function PessoasListClient() {
 
         {erro && <Message variant="error">{erro}</Message>}
 
-        {pessoas && (
+        {pessoas && linhas.length === 0 && (
+          <p className="text-body-md text-on-surface-variant">Nenhuma pessoa cadastrada ainda.</p>
+        )}
+
+        {pessoas && linhas.length > 0 && (
           <div className="rounded border border-outline-variant overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-body-md text-on-surface">
@@ -1359,13 +1398,28 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
 import { NovaPessoaClient } from './NovaPessoaClient';
 
+const mockResponsavel = {
+  public_id: 'pes_resp', nome: 'Geraldo Gestor',
+  vinculos: [{ id: 'v-g', papel: 'gestor', responsavel: null }],
+};
+
+/** Preenche Nome + Papel e seleciona um Responsável via o autocomplete
+ * (digita, espera o dropdown, clica no resultado) — reflete o fluxo
+ * real de um usuário, não define o estado por fora. */
+async function preencherCamposObrigatorios(nome = 'Ana Nova') {
+  fireEvent.change(screen.getByLabelText('Nome'), { target: { value: nome } });
+  fireEvent.change(screen.getByLabelText('Papel'), { target: { value: 'apoiador' } });
+  fireEvent.change(screen.getByLabelText('Responsável'), { target: { value: 'ger' } });
+  fireEvent.click(await screen.findByText('Geraldo Gestor'));
+}
+
 describe('NovaPessoaClient', () => {
   afterEach(() => cleanup());
 
   beforeEach(() => {
     globalThis.fetch = vi.fn(async (url: string) => {
       if (url.startsWith('/api/pessoas?q=')) {
-        return { ok: true, json: async () => ({ pessoas: [] }) } as Response;
+        return { ok: true, json: async () => ({ pessoas: [mockResponsavel] }) } as Response;
       }
       if (url === '/api/secoes') {
         return { ok: true, json: async () => ({ zonas: [{ id: 'z-1', numero: 5 }] }) } as Response;
@@ -1377,6 +1431,7 @@ describe('NovaPessoaClient', () => {
   it('envia POST /api/pessoas com os campos preenchidos', async () => {
     globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === '/api/secoes') return { ok: true, json: async () => ({ zonas: [] }) } as Response;
+      if (url.startsWith('/api/pessoas?q=')) return { ok: true, json: async () => ({ pessoas: [mockResponsavel] }) } as Response;
       if (url === '/api/pessoas' && init?.method === 'POST') {
         return { ok: true, status: 201, json: async () => ({ public_id: 'pes_novo' }) } as Response;
       }
@@ -1384,8 +1439,7 @@ describe('NovaPessoaClient', () => {
     }) as never;
 
     render(<NovaPessoaClient />);
-    fireEvent.change(screen.getByLabelText('Nome'), { target: { value: 'Ana Nova' } });
-    fireEvent.change(screen.getByLabelText('Papel'), { target: { value: 'apoiador' } });
+    await preencherCamposObrigatorios('Ana Nova');
     fireEvent.click(screen.getByText('Cadastrar'));
 
     await waitFor(() => {
@@ -1395,12 +1449,33 @@ describe('NovaPessoaClient', () => {
     const body = JSON.parse((chamada![1] as RequestInit).body as string);
     expect(body.nome).toBe('Ana Nova');
     expect(body.papel).toBe('apoiador');
+    expect(body.responsavel_id).toBe('pes_resp');
+  });
+
+  it('nome vazio mostra erro sem chamar POST', async () => {
+    render(<NovaPessoaClient />);
+    fireEvent.change(screen.getByLabelText('Responsável'), { target: { value: 'ger' } });
+    fireEvent.click(await screen.findByText('Geraldo Gestor'));
+    fireEvent.click(screen.getByText('Cadastrar'));
+
+    expect(await screen.findByText('Nome é obrigatório.')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalledWith('/api/pessoas', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('sem responsável selecionado mostra erro sem chamar POST', async () => {
+    render(<NovaPessoaClient />);
+    fireEvent.change(screen.getByLabelText('Nome'), { target: { value: 'Ana' } });
+    fireEvent.click(screen.getByText('Cadastrar'));
+
+    expect(await screen.findByText('Selecione um responsável.')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalledWith('/api/pessoas', expect.objectContaining({ method: 'POST' }));
   });
 
   it('409 mostra aviso de duplicata com botão de confirmar vínculo compartilhado', async () => {
     let chamadas = 0;
     globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === '/api/secoes') return { ok: true, json: async () => ({ zonas: [] }) } as Response;
+      if (url.startsWith('/api/pessoas?q=')) return { ok: true, json: async () => ({ pessoas: [mockResponsavel] }) } as Response;
       if (url === '/api/pessoas' && init?.method === 'POST') {
         chamadas += 1;
         if (chamadas === 1) {
@@ -1415,8 +1490,7 @@ describe('NovaPessoaClient', () => {
     }) as never;
 
     render(<NovaPessoaClient />);
-    fireEvent.change(screen.getByLabelText('Nome'), { target: { value: 'Ana' } });
-    fireEvent.change(screen.getByLabelText('Papel'), { target: { value: 'apoiador' } });
+    await preencherCamposObrigatorios('Ana');
     fireEvent.click(screen.getByText('Cadastrar'));
 
     expect(await screen.findByText(/Ana Duplicada/)).toBeInTheDocument();
@@ -1426,6 +1500,21 @@ describe('NovaPessoaClient', () => {
     const segundaChamada = vi.mocked(fetch).mock.calls[vi.mocked(fetch).mock.calls.length - 1];
     const body = JSON.parse((segundaChamada[1] as RequestInit).body as string);
     expect(body.confirmar_compartilhado).toBe(true);
+  });
+
+  it('falha de rede no POST mostra mensagem de erro genérica', async () => {
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/secoes') return { ok: true, json: async () => ({ zonas: [] }) } as Response;
+      if (url.startsWith('/api/pessoas?q=')) return { ok: true, json: async () => ({ pessoas: [mockResponsavel] }) } as Response;
+      if (url === '/api/pessoas' && init?.method === 'POST') throw new Error('network down');
+      throw new Error('fetch inesperado: ' + url);
+    }) as never;
+
+    render(<NovaPessoaClient />);
+    await preencherCamposObrigatorios('Ana');
+    fireEvent.click(screen.getByText('Cadastrar'));
+
+    expect(await screen.findByText('Não foi possível cadastrar a pessoa.')).toBeInTheDocument();
   });
 });
 ```
@@ -1524,6 +1613,19 @@ export function NovaPessoaClient() {
 
   async function enviar(confirmarCompartilhado: boolean) {
     setErro(null);
+    // Campos obrigatórios (spec decisão 9: Nome*, Responsável*, Papel*).
+    // `papel` sempre tem valor (select com default), então só nome e
+    // responsável precisam de checagem explícita — o backend também
+    // valida (400 sem nome/responsavel_id/papel), mas checar aqui evita
+    // um round-trip só pra descobrir um campo vazio.
+    if (!nome.trim()) {
+      setErro('Nome é obrigatório.');
+      return;
+    }
+    if (!responsavel) {
+      setErro('Selecione um responsável.');
+      return;
+    }
     // Normaliza pra dígitos ANTES de validar e enviar — encryptTitulo()
     // (web/lib/titulo-enc.ts) não normaliza como tituloHmac()/cpfHmac()
     // normalizam internamente; se mandássemos o título "cru" (com espaço/
@@ -1539,40 +1641,40 @@ export function NovaPessoaClient() {
       setErro('CPF inválido.');
       return;
     }
-    if (!responsavel) {
-      setErro('Selecione um responsável.');
-      return;
-    }
 
-    const res = await fetch('/api/pessoas', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        nome,
-        titulo: tituloDigits || undefined,
-        cpf: cpf || undefined,
-        telefone: telefone || undefined,
-        email_contato: emailContato || undefined,
-        responsavel_id: responsavel.public_id,
-        papel,
-        secao_id: secaoId || undefined,
-        confirmar_compartilhado: confirmarCompartilhado,
-      }),
-    });
+    try {
+      const res = await fetch('/api/pessoas', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          nome,
+          titulo: tituloDigits || undefined,
+          cpf: cpf || undefined,
+          telefone: telefone || undefined,
+          email_contato: emailContato || undefined,
+          responsavel_id: responsavel.public_id,
+          papel,
+          secao_id: secaoId || undefined,
+          confirmar_compartilhado: confirmarCompartilhado,
+        }),
+      });
 
-    if (res.status === 409) {
-      const body = await res.json();
-      setDuplicata({ match_por: body.match_por, pessoa_existente: body.pessoa_existente });
-      return;
-    }
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      setErro(body.erro ?? 'Não foi possível cadastrar a pessoa.');
-      return;
-    }
+      if (res.status === 409) {
+        const body = await res.json();
+        setDuplicata({ match_por: body.match_por, pessoa_existente: body.pessoa_existente });
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setErro(body.erro ?? 'Não foi possível cadastrar a pessoa.');
+        return;
+      }
 
-    const { public_id } = await res.json();
-    router.push(`/pessoas/${public_id}`);
+      const { public_id } = await res.json();
+      router.push(`/pessoas/${public_id}`);
+    } catch {
+      setErro('Não foi possível cadastrar a pessoa.');
+    }
   }
 
   return (
@@ -1748,18 +1850,26 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { PessoaDetalheClient } from './PessoaDetalheClient';
 
-const pessoaComResponsavel = {
+const pessoaComUmVinculo = {
   public_id: 'pes_a', nome: 'Ana', telefone: '999', email_contato: 'a@a.com',
   titulo: '012345678901', secao: { zona_numero: 5, secao_numero: 10 },
   base_legal: 'legitimointeresse', data_coleta: '2026-01-01',
   vinculos: [{ id: 'v-1', papel: 'apoiador', responsavel: { public_id: 'pes_r', nome: 'Resp' } }],
 };
 
+const pessoaComDoisVinculos = {
+  ...pessoaComUmVinculo,
+  vinculos: [
+    { id: 'v-1', papel: 'apoiador', responsavel: { public_id: 'pes_r', nome: 'Resp' } },
+    { id: 'v-2', papel: 'apoiador', responsavel: { public_id: 'pes_r2', nome: 'Resp2' } },
+  ],
+};
+
 describe('PessoaDetalheClient', () => {
   afterEach(() => cleanup());
 
   it('mostra os dados e "Possui 1 vínculo(s) ativo(s)"', async () => {
-    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => pessoaComResponsavel })) as never;
+    globalThis.fetch = vi.fn(async () => ({ ok: true, json: async () => pessoaComUmVinculo })) as never;
     render(<PessoaDetalheClient publicId="pes_a" />);
 
     expect(await screen.findByText('Ana')).toBeInTheDocument();
@@ -1767,9 +1877,22 @@ describe('PessoaDetalheClient', () => {
     expect(screen.getByText('Resp')).toBeInTheDocument();
   });
 
+  it('"Remover vínculo" vem desabilitado quando é o único vínculo da pessoa, sem chamar impacto', async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      if (url === '/api/pessoas/pes_a') return { ok: true, json: async () => pessoaComUmVinculo } as Response;
+      throw new Error('fetch inesperado: ' + url);
+    }) as never;
+
+    render(<PessoaDetalheClient publicId="pes_a" />);
+    await screen.findByText('Ana');
+
+    expect(screen.getByText('Remover vínculo')).toBeDisabled();
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/impacto'));
+  });
+
   it('remover vínculo: impacto -> confirma -> DELETE com destino_id = responsavel_acima', async () => {
     globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url === '/api/pessoas/pes_a') return { ok: true, json: async () => pessoaComResponsavel } as Response;
+      if (url === '/api/pessoas/pes_a') return { ok: true, json: async () => pessoaComDoisVinculos } as Response;
       if (url === '/api/vinculos/v-1/impacto') {
         return { ok: true, json: async () => ({ count: 2, responsavel_acima: { public_id: 'pes_acima', nome: 'Acima' } }) } as Response;
       }
@@ -1782,7 +1905,7 @@ describe('PessoaDetalheClient', () => {
     render(<PessoaDetalheClient publicId="pes_a" />);
     await screen.findByText('Ana');
 
-    fireEvent.click(screen.getByText('Remover vínculo'));
+    fireEvent.click(screen.getAllByText('Remover vínculo')[0]);
     expect(await screen.findByText(/2 pessoa\(s\) serão realocadas para/)).toBeInTheDocument();
     expect(screen.getByText(/Acima/)).toBeInTheDocument();
 
@@ -1796,9 +1919,32 @@ describe('PessoaDetalheClient', () => {
     });
   });
 
-  it('botão "Remover vínculo" fica desabilitado quando responsavel_acima é null', async () => {
+  it('Cancelar fecha o modal sem chamar DELETE', async () => {
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/pessoas/pes_a') return { ok: true, json: async () => pessoaComDoisVinculos } as Response;
+      if (url === '/api/vinculos/v-1/impacto') {
+        return { ok: true, json: async () => ({ count: 2, responsavel_acima: { public_id: 'pes_acima', nome: 'Acima' } }) } as Response;
+      }
+      if (url === '/api/vinculos/v-1' && init?.method === 'DELETE') {
+        throw new Error('não deveria chamar DELETE após Cancelar');
+      }
+      throw new Error('fetch inesperado: ' + url);
+    }) as never;
+
+    render(<PessoaDetalheClient publicId="pes_a" />);
+    await screen.findByText('Ana');
+
+    fireEvent.click(screen.getAllByText('Remover vínculo')[0]);
+    await screen.findByText('Confirmar remoção');
+    fireEvent.click(screen.getByText('Cancelar'));
+
+    expect(screen.queryByText('Confirmar remoção')).not.toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalledWith('/api/vinculos/v-1', expect.objectContaining({ method: 'DELETE' }));
+  });
+
+  it('botão "Confirmar remoção" fica desabilitado quando responsavel_acima é null', async () => {
     globalThis.fetch = vi.fn(async (url: string) => {
-      if (url === '/api/pessoas/pes_a') return { ok: true, json: async () => pessoaComResponsavel } as Response;
+      if (url === '/api/pessoas/pes_a') return { ok: true, json: async () => pessoaComDoisVinculos } as Response;
       if (url === '/api/vinculos/v-1/impacto') {
         return { ok: true, json: async () => ({ count: 0, responsavel_acima: null }) } as Response;
       }
@@ -1807,11 +1953,32 @@ describe('PessoaDetalheClient', () => {
 
     render(<PessoaDetalheClient publicId="pes_a" />);
     await screen.findByText('Ana');
-    fireEvent.click(screen.getByText('Remover vínculo'));
+    fireEvent.click(screen.getAllByText('Remover vínculo')[0]);
 
     await waitFor(() => {
       expect(screen.getByText('Confirmar remoção')).toBeDisabled();
     });
+  });
+
+  it('DELETE 404 (vínculo já removido por outra sessão) mostra erro', async () => {
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/pessoas/pes_a') return { ok: true, json: async () => pessoaComDoisVinculos } as Response;
+      if (url === '/api/vinculos/v-1/impacto') {
+        return { ok: true, json: async () => ({ count: 0, responsavel_acima: { public_id: 'pes_acima', nome: 'Acima' } }) } as Response;
+      }
+      if (url === '/api/vinculos/v-1' && init?.method === 'DELETE') {
+        return { ok: false, status: 404, json: async () => ({ erro: 'vinculo_nao_encontrado' }) } as Response;
+      }
+      throw new Error('fetch inesperado: ' + url);
+    }) as never;
+
+    render(<PessoaDetalheClient publicId="pes_a" />);
+    await screen.findByText('Ana');
+    fireEvent.click(screen.getAllByText('Remover vínculo')[0]);
+    await screen.findByText('Confirmar remoção');
+    fireEvent.click(screen.getByText('Confirmar remoção'));
+
+    expect(await screen.findByText('Não foi possível remover o vínculo.')).toBeInTheDocument();
   });
 });
 ```
@@ -1957,7 +2124,9 @@ export function PessoaDetalheClient({ publicId }: { publicId: string }) {
                 <button
                   type="button"
                   onClick={() => iniciarRemocao(v.id)}
-                  className="rounded px-3 py-1.5 text-body-md text-error hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                  disabled={pessoa.vinculos.length === 1}
+                  title={pessoa.vinculos.length === 1 ? 'Remover o último vínculo deixaria esta pessoa inacessível pelo produto.' : undefined}
+                  className="rounded px-3 py-1.5 text-body-md text-error hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:no-underline"
                 >
                   Remover vínculo
                 </button>
@@ -1986,13 +2155,22 @@ export function PessoaDetalheClient({ publicId }: { publicId: string }) {
                     />
                   </div>
                 )}
-                <button
-                  type="button"
-                  onClick={confirmarRemocao}
-                  className="mt-3 rounded bg-primary px-4 py-2 text-body-md text-on-primary hover:bg-primary/90"
-                >
-                  Confirmar remoção
-                </button>
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={confirmarRemocao}
+                    className="rounded bg-primary px-4 py-2 text-body-md text-on-primary hover:bg-primary/90"
+                  >
+                    Confirmar remoção
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setVinculoRemovendo(null); setImpacto(null); setDestinoManual(null); }}
+                    className="rounded px-4 py-2 text-body-md text-on-surface-variant hover:text-on-surface"
+                  >
+                    Cancelar
+                  </button>
+                </div>
               </>
             ) : (
               <>
@@ -2000,9 +2178,18 @@ export function PessoaDetalheClient({ publicId }: { publicId: string }) {
                   Este é o vínculo raiz (Gestor) e não tem responsável acima — removê-lo é uma
                   decisão de ciclo de vida da campanha, fora do escopo desta tela.
                 </p>
-                <button type="button" disabled className="mt-3 rounded bg-primary px-4 py-2 text-body-md text-on-primary opacity-50">
-                  Confirmar remoção
-                </button>
+                <div className="mt-3 flex gap-2">
+                  <button type="button" disabled className="rounded bg-primary px-4 py-2 text-body-md text-on-primary opacity-50">
+                    Confirmar remoção
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setVinculoRemovendo(null); setImpacto(null); setDestinoManual(null); }}
+                    className="rounded px-4 py-2 text-body-md text-on-surface-variant hover:text-on-surface"
+                  >
+                    Cancelar
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -2052,7 +2239,12 @@ Com `npm run dev` rodando e sessão de `gestor.a@teste.local` autenticada (mesmo
 - Mobile (375px): sem scroll horizontal de página em nenhuma das 3 telas novas.
 - Zero erro/warning no console em qualquer uma das 3 telas.
 
-Ao final, limpar a pessoa de teste criada (`delete from pessoa where public_id = '...'` — cascata cuida do `vinculo`; conferir se há `ON DELETE` apropriado ou se precisa apagar `vinculo` primeiro).
+**Limpeza da pessoa de teste é só pra ambiente local de desenvolvimento/verificação** — não é um passo do fluxo normal do produto (esta fatia, de propósito, não tem "excluir pessoa" nenhum, ver spec decisão 14 e não-objetivos). Ao final, rodar via SQL direto **só no projeto Supabase de dev** (`axcftjqdjvknrpqzrxls`), nunca em produção:
+```sql
+delete from vinculo where pessoa_id = (select id from pessoa where public_id = '<public_id da pessoa de teste>');
+delete from pessoa where public_id = '<public_id da pessoa de teste>';
+```
+(apagar `vinculo` antes de `pessoa` — sem `ON DELETE CASCADE` confirmado entre as 2 tabelas, mais seguro apagar na ordem certa do que assumir cascata).
 
 - [ ] **Step 4: Parar o dev server**
 
@@ -2060,8 +2252,18 @@ Se ficou rodando em background, encerrar.
 
 ---
 
+## Definition of Done
+
+- Migration aplicada e verificada (`pg_get_functiondef` mostra `p_secao_id`/`buscar_pessoas`).
+- Todas as 3 rotas de API novas + a rota existente modificada implementadas e testadas.
+- Todas as 3 telas novas implementadas, usando só componentes/tokens já existentes no design system (+ `ResponsavelAutocomplete`, único componente novo, justificado por 2 usos).
+- `npm test` passa (suite inteira, não só os arquivos desta fatia).
+- `npm run lint` sem erro novo (os 5 pré-existentes de `react-hooks/set-state-in-effect` continuam fora de escopo).
+- Verificação visual real (Playwright) confirma: cadastro com seção aparece no mapa de calor; fluxo de duplicata; remoção de vínculo com realocação; guard do último vínculo e do vínculo raiz funcionando; mobile sem scroll horizontal; zero erro de console.
+- Pessoa(s) de teste criadas durante a verificação removidas do banco de dev antes de finalizar.
+
 ## Self-Review Notes
 
-- **Spec coverage:** decisão 1 (escopo cadastrar/listar/remover) → todas as tasks. Decisão 2 (`secao_id`) → Task 1. Decisões 3-4 (`GET /api/pessoas`) → Task 2. Decisão 5 (`GET /api/pessoas/[publicId]`) → Task 3. Decisões 6-7 (`GET /api/secoes`) → Task 4. Decisão 8 (lista) → Task 7. Decisões 9-10 (form + duplicata) → Task 8. Decisões 11-13 (detalhe + remover + raiz sem responsável) → Task 9. Não-objetivos são estruturalmente impossíveis de violar (nenhuma task cria edição de pessoa, provisionamento de login, exclusão de pessoa, UI de auditoria ou árvore visual).
-- **Placeholder scan:** nenhum "TBD"/"TODO"; todo passo mostra código completo, incluindo os 2 ramos do caso `responsavel_acima` null/não-null na Task 9.
-- **Type consistency:** `Pessoa`, `Vinculo`, `Zona`, `Secao`, `Impacto` são redefinidos localmente em cada componente (sem tipo compartilhado — mesmo padrão já usado em `DashboardSuperadminClient.tsx`/`MapaCalorClient.tsx`, nenhum arquivo de tipos central no projeto) mas os *campos* batem entre a resposta declarada nas Tasks 2/3/4 e o consumo nas Tasks 7/8/9. `secao_id` tem o mesmo nome em `CriarPessoaInput` (Task 1), no body do `POST` (Task 1) e no formulário (Task 8).
+- **Spec coverage:** decisão 1 (escopo cadastrar/listar/remover) → todas as tasks. Decisão 2 (`secao_id`) → Task 1. Decisões 3-4 (`GET /api/pessoas`) → Task 2. Decisão 5 (`GET /api/pessoas/[publicId]`) → Task 3. Decisões 6-7 (`GET /api/secoes`) → Task 4. Decisão 8 (lista) → Task 7. Decisões 9-10 (form + duplicata) → Task 8. Decisões 11-14 (detalhe + remover + raiz sem responsável + último vínculo) → Task 9. Não-objetivos são estruturalmente impossíveis de violar (nenhuma task cria edição de pessoa, provisionamento de login, exclusão de pessoa, UI de auditoria ou árvore visual).
+- **Placeholder scan:** nenhum "TBD"/"TODO"; todo passo mostra código completo, incluindo os 2 ramos do caso `responsavel_acima` null/não-null e o guard do último vínculo na Task 9.
+- **Type consistency:** `Pessoa`, `Vinculo`, `Zona`, `Secao`, `Impacto` são redefinidos localmente em cada componente (sem tipo compartilhado — mesmo padrão já usado em `DashboardSuperadminClient.tsx`/`MapaCalorClient.tsx`, nenhum arquivo de tipos central no projeto) mas os *campos* batem entre a resposta declarada nas Tasks 2/3/4 e o consumo nas Tasks 7/8/9. `secao_id` tem o mesmo nome em `CriarPessoaInput` (Task 1), no body do `POST` (Task 1) e no formulário (Task 8). `MIN_CARACTERES`/`LIMITE_RESULTADOS` (Task 6) só existem no client, não afetam a assinatura de `GET /api/pessoas` (Task 2), que continua sem paginação/limite server-side.
