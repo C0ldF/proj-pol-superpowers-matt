@@ -192,14 +192,15 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
     for uma Pessoa navegável).
 12. **Remover vínculo:** botão por vínculo → `GET .../impacto` primeiro
     → modal de confirmação "**N** pessoa(s) serão realocadas para
-    **{responsavel_acima.nome}**" → `DELETE`. **A UI sempre envia
-    `destino_id` no corpo do `DELETE`** — por padrão o
-    `responsavel_acima.public_id` retornado pelo `impacto` (nunca omite
-    o campo; o backend não escolhe esse default sozinho, ver "Estado
-    atual do backend" acima). Se `N > 50` (limiar do ADR 0016), o modal
-    troca o tom de aviso (mais enfático) e ganha um campo de busca
-    (mesmo autocomplete do form de cadastro, decisão 9) pra escolher um
-    `destino_id` diferente do default, em vez de só confirmar.
+    **{responsavel_acima.nome}**" + botão "Cancelar" (fecha o modal sem
+    chamar `DELETE`) → `DELETE`. **A UI sempre envia `destino_id` no
+    corpo do `DELETE`** — por padrão o `responsavel_acima.public_id`
+    retornado pelo `impacto` (nunca omite o campo; o backend não escolhe
+    esse default sozinho, ver "Estado atual do backend" acima). Se
+    `N > 50` (limiar do ADR 0016), o modal troca o tom de aviso (mais
+    enfático) e ganha um campo de busca (mesmo autocomplete do form de
+    cadastro, decisão 9) pra escolher um `destino_id` diferente do
+    default, em vez de só confirmar.
 13. **Vínculo raiz (Gestor, `responsavel_id IS NULL`) não tem
     "responsável acima".** `actor_pode_remover_vinculo` (verificado no
     código) não impede um Gestor de remover o próprio vínculo raiz — se
@@ -210,6 +211,18 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
     Gestor raiz é decisão de ciclo de vida da campanha, fora de escopo
     aqui (não é o mesmo tipo de operação que remover um Coordenador/
     Liderança/Apoiador comum).
+14. **Remover o último vínculo de uma Pessoa a deixa órfã, não
+    apagada.** ADR 0016 é explícito: remover vínculo nunca apaga a
+    Pessoa (esse é o fluxo separado de exclusão LGPD, ADR 0009, fora de
+    escopo). Mas como a visibilidade (RLS `pessoa_select`/
+    `vinculo_select`) é sempre via vínculo, uma Pessoa com **zero**
+    vínculos deixa de aparecer em qualquer listagem/busca desta fatia —
+    o registro continua existindo no banco (PII incluída) mas fica
+    inalcançável pelo produto, só recuperável via SQL direto. Pra não
+    criar esse estado por acidente, esta fatia **desabilita "Remover
+    vínculo" quando é o único vínculo da Pessoa** (`vinculos.length ===
+    1`), com texto explicando que remover o último vínculo tornaria a
+    pessoa inacessível pelo produto.
 
 ## Arquitetura
 
