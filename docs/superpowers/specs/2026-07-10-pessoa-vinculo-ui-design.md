@@ -83,12 +83,19 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
 ### `GET /api/pessoas` (lista, nova)
 
 3. **Busca por nome, sem paginação, ordenado por nome.** `?q=<termo>`
-   faz `WHERE nome ILIKE '%<termo>%'` (substring, não só prefixo — RLS
-   já filtra a sub-árvore antes de qualquer busca, impossível ver
-   pessoa fora dela). Sem `q`, lista tudo que a RLS libera. `ORDER BY
-   nome ASC` sempre. Sem paginação nesta fatia — volume de uma campanha
-   em MVP é dezenas a poucas centenas de pessoas, YAGNI adicionar
-   cursor/offset agora.
+   faz `WHERE unaccent(nome) ILIKE unaccent('%<termo>%')` — substring
+   (não só prefixo), `ILIKE` já é case-insensitive por definição do
+   Postgres, e `unaccent()` torna a busca também acento-insensitive
+   ("jose" acha "José"); as extensões `unaccent`/`pg_trgm` já estão
+   habilitadas neste banco desde o S3 (ingestão TRE), sem custo de
+   habilitar de novo. RLS já filtra a sub-árvore antes de qualquer
+   busca, impossível ver pessoa fora dela. Sem `q`, lista tudo que a
+   RLS libera. `ORDER BY nome ASC` sempre. Sem paginação nesta fatia —
+   volume de uma campanha em MVP é dezenas a poucas centenas de
+   pessoas, YAGNI adicionar cursor/offset agora; **se o volume passar
+   de algumas centenas de pessoas por campanha, paginação vira
+   requisito** (sinal pra revisão futura, não motivo pra construir
+   agora).
    Resposta: `{ pessoas: [{ public_id, nome, vinculos: [{ id, papel,
    responsavel: { public_id, nome } | null }] }] }` — `vinculos` é lista
    (não singular) porque uma Pessoa pode ter mais de um Vínculo (ADR
@@ -102,7 +109,7 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
 
 ### `GET /api/pessoas/[publicId]` (detalhe, nova)
 
-5. Resposta: `{ public_id, nome, telefone, email_contato, titulo:
+5. Resposta `200`: `{ public_id, nome, telefone, email_contato, titulo:
    string | null, secao: { zona_numero, secao_numero } | null,
    base_legal, data_coleta, vinculos: [{ id, papel, responsavel: {
    public_id, nome } | null }] }`. `titulo` vem **decriptado**
@@ -111,7 +118,11 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
    público é o comportamento pretendido pelo ADR 0010 ("cifra pra
    exibição", não pra esconder de todo mundo). **CPF nunca aparece na
    resposta** — não existe `cpf_enc` na tabela, só hash irreversível;
-   não há o que decriptar.
+   não há o que decriptar. `publicId` inexistente **ou** fora da
+   sub-árvore visível do actor (RLS bloqueia a leitura, os dois casos
+   ficam indistinguíveis de propósito — não vazar "existe mas você não
+   pode ver" por enumeração) → `404 { erro: 'pessoa não encontrada' }`,
+   mesmo padrão de erro genérico já usado em `provisionar-login`.
 
 ### `GET /api/secoes` (busca zona/seção, nova)
 
@@ -158,7 +169,12 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
    `actor_pode_criar_vinculo_sob` (verificado no código) valida quem é
    o *ator* da ação, nunca o papel do `responsavel_id` escolhido — hoje
    nada no banco impede escolher um Apoiador como responsável. O filtro
-   de UI é a única barreira contra esse erro nesta fatia.
+   de UI é a única barreira contra esse erro nesta fatia. **Débito
+   técnico conhecido, decisão consciente:** um cliente HTTP fora da UI
+   (`curl`/Postman) ainda consegue enviar `POST /api/pessoas` com
+   `responsavel_id` de um Apoiador e o backend aceita — a validação
+   deveria migrar pro backend (RPC ou `actor_pode_criar_vinculo_sob`)
+   numa fatia futura; não faz parte desta.
 10. **Duplicata (409):** modal/mensagem no formato "Já existe uma
     pessoa cadastrada com este título/CPF. Nome encontrado:
     **{nome}**. Deseja apenas criar um novo vínculo?" + checkbox/botão
@@ -184,6 +200,16 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
     troca o tom de aviso (mais enfático) e ganha um campo de busca
     (mesmo autocomplete do form de cadastro, decisão 9) pra escolher um
     `destino_id` diferente do default, em vez de só confirmar.
+13. **Vínculo raiz (Gestor, `responsavel_id IS NULL`) não tem
+    "responsável acima".** `actor_pode_remover_vinculo` (verificado no
+    código) não impede um Gestor de remover o próprio vínculo raiz — se
+    isso acontecesse, `GET .../impacto` retornaria `responsavel_acima:
+    null` e a decisão 12 não teria pra onde apontar o default. Esta
+    fatia **desabilita o botão "Remover vínculo"** quando
+    `responsavel_acima` vem `null`, com texto explicando que remover o
+    Gestor raiz é decisão de ciclo de vida da campanha, fora de escopo
+    aqui (não é o mesmo tipo de operação que remover um Coordenador/
+    Liderança/Apoiador comum).
 
 ## Arquitetura
 
@@ -230,6 +256,11 @@ nesta fatia, só relevante se um dia existir exclusão de seção),
   existente, mas os endpoints novos são a primeira vez que ficam
   expostos a leitura direta por HTTP, então o teste precisa existir
   aqui, não só confiar que a policy "deve" funcionar.
+- **Teste de vínculo compartilhado:** Pessoa com 2 Vínculos (2
+  responsáveis diferentes) → `GET /api/pessoas` retorna exatamente 2
+  entradas em `vinculos[]` pra ela (não 1, não deduplicado) — protege
+  diretamente a regra da decisão 3/8 desta fatia (nunca esconder o
+  segundo vínculo atrás do primeiro).
 - Teste da migration: `criar_pessoa_com_vinculo` com `p_secao_id` null
   (comportamento antigo intacto) e não-null (nova coluna persistida).
 - Testes de componente (Testing Library) pras 3 telas novas, seguindo o
