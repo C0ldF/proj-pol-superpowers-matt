@@ -173,139 +173,141 @@ export function DashboardSuperadminClient() {
         </button>
       </header>
       <main className="flex flex-col gap-6 p-6">
-      <div className="rounded border border-outline-variant bg-surface-container-lowest p-6">
-        <h2 className="mb-4 text-headline-md text-on-surface">Cadastrar nova campanha</h2>
-        <form onSubmit={criarCampanha} className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <Input
-            label="Subdomínio"
-            value={subdominio}
-            onChange={(e) => setSubdominio(e.target.value)}
-            placeholder="Subdomínio"
-          />
-          <Input
-            label="Nome"
-            value={nome}
-            onChange={(e) => setNome(e.target.value)}
-            placeholder="Nome"
-          />
-          <label className="flex flex-col gap-1">
-            <span className="text-label-md text-on-surface-variant">Cargo</span>
-            <select
-              aria-label="cargo"
-              value={cargo}
-              onChange={(e) => setCargo(e.target.value as Cargo)}
-              className={selectClassName}
-            >
-              {CARGOS.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-label-md text-on-surface-variant">Abrangência</span>
-            <select
-              aria-label="abrangência"
-              value={abrangencia}
-              onChange={(e) => setAbrangencia(e.target.value as Abrangencia)}
-              className={selectClassName}
-            >
-              {ABRANGENCIAS.map((a) => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-          </label>
-          {abrangencia === 'municipal' ? (
+        <div className="rounded border border-outline-variant bg-surface-container-lowest p-6">
+          <h2 className="mb-4 text-headline-md text-on-surface">Cadastrar nova campanha</h2>
+          <form onSubmit={criarCampanha} className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Input
-              label="Código IBGE do município"
-              type="number"
-              value={municipioId}
-              onChange={(e) => setMunicipioId(e.target.value)}
-              placeholder="Código IBGE do município"
+              label="Subdomínio"
+              value={subdominio}
+              onChange={(e) => setSubdominio(e.target.value)}
+              placeholder="Subdomínio"
             />
-          ) : (
             <Input
-              label="UF"
-              value={uf}
-              onChange={(e) => setUf(e.target.value)}
-              placeholder="UF"
-              maxLength={2}
+              label="Nome"
+              value={nome}
+              onChange={(e) => setNome(e.target.value)}
+              placeholder="Nome"
             />
-          )}
-          <Input
-            label="Data da eleição"
-            type="date"
-            value={dataEleicao}
-            onChange={(e) => setDataEleicao(e.target.value)}
-            placeholder="Data da eleição"
-          />
-          <Button type="submit" className="md:col-span-2">
-            Nova campanha
-          </Button>
-          {erroCriar && <Message variant="error">{erroCriar}</Message>}
-        </form>
-      </div>
-
-      <div className="flex flex-col gap-4">
-        <h2 className="text-headline-md text-on-surface">Campanhas</h2>
-        <div className="rounded border border-outline-variant overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-body-md text-on-surface">
-              <thead className="bg-surface-container-low">
-                <tr>
-                  <th className="px-4 py-2 font-medium">Campanha</th>
-                  {MODULOS.map((m) => (
-                    <th key={m} className="px-4 py-2 text-center font-medium">
-                      {m}
-                    </th>
-                  ))}
-                  <th className="px-4 py-2 font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {campanhas.map((c) => (
-                  <tr key={c.id} className="border-t border-outline-variant">
-                    <td className="px-4 py-2">
-                      {c.nome} ({c.subdominio})
-                    </td>
-                    {MODULOS.map((m) => {
-                      const habilitado = c.modulos_habilitados.includes(m);
-                      const chave = `${c.id}:${m}`;
-                      return (
-                        <td key={m} className="px-4 py-2 text-center">
-                          <input
-                            type="checkbox"
-                            aria-label={m}
-                            checked={habilitado}
-                            disabled={carregando === chave}
-                            onChange={() => alternar(c, m, habilitado)}
-                            className="accent-primary"
-                          />
-                        </td>
-                      );
-                    })}
-                    <td className="px-4 py-2">
-                      <div className="flex items-center gap-2">
-                        <span>{c.status}</span>
-                        {PROXIMOS_STATUS[c.status].map(({ novoStatus, rotulo }) => (
-                          <button
-                            key={novoStatus}
-                            type="button"
-                            disabled={carregando === `status:${c.id}`}
-                            onClick={() => mudarStatus(c, novoStatus)}
-                            className={`inline-flex items-center justify-center rounded bg-primary px-3 py-1.5 text-body-md text-on-primary transition-colors hover:bg-primary/90 active:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-primary ${focoVisivel}`}
-                          >
-                            {rotulo}
-                          </button>
-                        ))}
-                      </div>
-                    </td>
-                  </tr>
+            <label className="flex flex-col gap-1">
+              <span className="text-label-md text-on-surface-variant">Cargo</span>
+              <select
+                value={cargo}
+                onChange={(e) => setCargo(e.target.value as Cargo)}
+                className={selectClassName}
+              >
+                {CARGOS.map((c) => (
+                  <option key={c} value={c}>{c}</option>
                 ))}
-              </tbody>
-            </table>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-label-md text-on-surface-variant">Abrangência</span>
+              <select
+                value={abrangencia}
+                onChange={(e) => setAbrangencia(e.target.value as Abrangencia)}
+                className={selectClassName}
+              >
+                {ABRANGENCIAS.map((a) => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+            </label>
+            {abrangencia === 'municipal' ? (
+              <Input
+                label="Código IBGE do município"
+                type="number"
+                value={municipioId}
+                onChange={(e) => setMunicipioId(e.target.value)}
+                placeholder="Código IBGE do município"
+              />
+            ) : (
+              <Input
+                label="UF"
+                value={uf}
+                onChange={(e) => setUf(e.target.value)}
+                placeholder="UF"
+                maxLength={2}
+              />
+            )}
+            <Input
+              label="Data da eleição"
+              type="date"
+              value={dataEleicao}
+              onChange={(e) => setDataEleicao(e.target.value)}
+              placeholder="Data da eleição"
+            />
+            <Button type="submit" className="md:col-span-2">
+              Nova campanha
+            </Button>
+            {erroCriar && (
+              <div className="md:col-span-2">
+                <Message variant="error">{erroCriar}</Message>
+              </div>
+            )}
+          </form>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <h2 className="text-headline-md text-on-surface">Campanhas</h2>
+          <div className="rounded border border-outline-variant overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-body-md text-on-surface">
+                <thead className="bg-surface-container-low">
+                  <tr>
+                    <th className="px-4 py-2 font-medium">Campanha</th>
+                    {MODULOS.map((m) => (
+                      <th key={m} className="px-4 py-2 text-center font-medium">
+                        {m}
+                      </th>
+                    ))}
+                    <th className="px-4 py-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {campanhas.map((c) => (
+                    <tr key={c.id} className="border-t border-outline-variant">
+                      <td className="px-4 py-2">
+                        {c.nome} ({c.subdominio})
+                      </td>
+                      {MODULOS.map((m) => {
+                        const habilitado = c.modulos_habilitados.includes(m);
+                        const chave = `${c.id}:${m}`;
+                        return (
+                          <td key={m} className="px-4 py-2 text-center">
+                            <input
+                              type="checkbox"
+                              aria-label={m}
+                              checked={habilitado}
+                              disabled={carregando === chave}
+                              onChange={() => alternar(c, m, habilitado)}
+                              className="accent-primary"
+                            />
+                          </td>
+                        );
+                      })}
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-2">
+                          <span>{c.status}</span>
+                          {PROXIMOS_STATUS[c.status].map(({ novoStatus, rotulo }) => (
+                            <button
+                              key={novoStatus}
+                              type="button"
+                              disabled={carregando === `status:${c.id}`}
+                              onClick={() => mudarStatus(c, novoStatus)}
+                              className={`inline-flex items-center justify-center rounded bg-primary px-3 py-1.5 text-body-md text-on-primary transition-colors hover:bg-primary/90 active:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-primary ${focoVisivel}`}
+                            >
+                              {rotulo}
+                            </button>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
-      </div>
       </main>
     </div>
   );
